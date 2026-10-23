@@ -120,6 +120,7 @@ nav:
     - Using_PWM_Tools.md
   - Developer Documentation:
     - Code_Overview.md
+    - LCD_STATUS_PLAN.md
     - Kinematics.md
     - Protocol.md
     - API_Server.md

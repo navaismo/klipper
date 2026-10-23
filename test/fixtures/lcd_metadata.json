@@ -1,0 +1,18 @@
+{
+  "result": {
+    "filename": "parts/cube.gcode",
+    "slicer": "OrcaSlicer",
+    "layer_count": 100,
+    "layer_height": 0.2,
+    "estimated_time": 3600,
+    "filament_type": "PETG",
+    "filament_name": "Generic PETG",
+    "thumbnails": [
+      {
+        "width": 96,
+        "height": 96,
+        "relative_path": ".thumbs/cube-96x96.png"
+      }
+    ]
+  }
+}

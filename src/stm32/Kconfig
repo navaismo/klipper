@@ -528,6 +528,16 @@ choice
         depends on HAVE_STM32_FDCANBUS
 endchoice
 
+config TJC_LCD
+    bool "TJC LCD on USART2 PA2/PA3 (Ender-3 V3 SE)"
+    depends on MACH_STM32F103 && !MACH_STM32F103x6
+    depends on !STM32_SERIAL_USART2 && !STM32_SERIAL_USART2_ALT_PD6_PD5
+    default n
+    help
+        Build the mainboard C driver for the stock TJC display. Reserves
+        PA2/PA3 and USART2 at 115200 baud independently of the host link.
+        The [tjc_lcd] Klippy extra starts the handshake and clear sequence.
+
 
 config STM32_CANBUS_PB8_PB9
     bool

@@ -8,6 +8,17 @@ All dates in this document are approximate.
 
 ## Changes
 
+20261022 (fork LCD): The job/idle layouts use payload v5 and require
+matching host extras and MCU firmware advertising `TJC_JOB_VERSION=5`.
+Previously exported v1/v2/v3/v4 binary jobs must be regenerated. Keep the
+existing `CONFIG_TJC_LCD=y` and working bootloader/clock/host UART choices.
+Pillow is now in the normal host requirements; requirement-aware updates
+install it into the Klippy environment. No printer configuration changes
+are needed for the new card layout. V5 adds lossless rectangle image
+transport with raw fallback and 40-byte chunks. Prepared thumbnails now
+use 64 colors; display names omit G-code suffixes. Idle drawing now survives
+the startup clearing state and also handles idle_timeout:idle.
+
 20261018: An error in the `PID_CALIBRATE` calculations has been
 corrected. Previously, the code would recommend PID values that were
 twice their desired values (relative to the standard "Astrom-Hagglund
