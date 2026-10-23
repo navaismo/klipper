@@ -21,6 +21,7 @@ class VirtualSD:
         self.sdcard_dirname = os.path.normpath(os.path.expanduser(sd))
         self.current_file = None
         self.file_position = self.file_size = 0
+        self.preflight_done = self.preflight_pending = False
         # Print Stat Tracking
         self.print_stats = self.printer.load_object(config, 'print_stats')
         # Work timer
@@ -126,8 +127,24 @@ class VirtualSD:
             while self.work_timer is not None and not self.cmd_from_sd:
                 self.reactor.pause(self.reactor.monotonic() + .001)
     def do_resume(self):
-        if self.work_timer is not None:
+        if self.work_timer is not None or self.preflight_pending:
             raise self.gcode.error("SD busy")
+        # Prepare once per loaded file, before scheduling its first G-code.
+        # Handlers may yield; reject changes to the job while they run.
+        if self.current_file is not None and not self.preflight_done:
+            current_file, position = self.current_file, self.file_position
+            filename = os.path.relpath(current_file.name, self.sdcard_dirname)
+            self.preflight_pending = True
+            try:
+                self.printer.send_event("virtual_sdcard:before_print", filename)
+                if (self.current_file is not current_file
+                    or self.file_position != position
+                    or self.printer.is_shutdown()):
+                    raise self.gcode.error(
+                        "SD print changed during preparation")
+                self.preflight_done = True
+            finally:
+                self.preflight_pending = False
         self.must_pause_work = False
         self.work_timer = self.reactor.register_timer(
             self.work_handler, self.reactor.NOW)
@@ -137,7 +154,10 @@ class VirtualSD:
             self.current_file.close()
             self.current_file = None
             self.print_stats.note_cancel()
+            if self.work_timer is None:
+                self.printer.send_event("virtual_sdcard:finished", "cancelled")
         self.file_position = self.file_size = 0
+        self.preflight_done = False
     # G-Code commands
     def cmd_error(self, gcmd):
         raise gcmd.error("SD write not supported")
@@ -147,6 +167,7 @@ class VirtualSD:
             self.current_file.close()
             self.current_file = None
         self.file_position = self.file_size = 0
+        self.preflight_done = False
         self.print_stats.reset()
         self.printer.send_event("virtual_sdcard:reset_file")
     cmd_SDCARD_RESET_FILE_help = "Clears a loaded SD File. Stops the print "\
@@ -210,6 +231,7 @@ class VirtualSD:
         self.current_file = f
         self.file_position = 0
         self.file_size = fsize
+        self.preflight_done = False
         self.print_stats.set_current_file(filename)
     def cmd_M24(self, gcmd):
         # Start/resume SD print
@@ -317,6 +339,10 @@ class VirtualSD:
             self.print_stats.note_pause()
         else:
             self.print_stats.note_complete()
+            state = self.print_stats.get_status(
+                self.reactor.monotonic())['state']
+            if state in ('complete', 'cancelled'):
+                self.printer.send_event("virtual_sdcard:finished", state)
         return self.reactor.NEVER
 
 def load_config(config):

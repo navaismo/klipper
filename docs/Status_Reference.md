@@ -89,6 +89,89 @@ The following information is available in the `display_status` object
   `virtual_sdcard.progress` if no recent `M73` received).
 - `message`: The message contained in the last `M117` G-Code command.
 
+## lcd_status
+
+The fork-specific [lcd_status](Config_Reference.md#lcd_status) object
+provides a snapshot only; reading status does not query Moonraker or
+communicate with the LCD:
+
+- `state`: `empty`, `preparing`, `prepared`, or `error`. `prepared` means
+  collection succeeded, not that anything was rendered or sent to the MCU.
+- `error`: The latest collection error, or null.
+- `job`: Null until collection succeeds, otherwise a dictionary with
+  `filename`, `total_layers`, `layer_height` (mm), `estimated_time`
+  (seconds, estimated total), `material`, `filament_name`, `thumbnail`,
+  `nozzle_target`, `bed_target` (degrees Celsius), `transfer`, and `warnings`.
+  Unknown fields are null. Material prefers the slicer's
+  filament type, falling back to its filament name; it is not a sensor reading.
+- `job.nozzle_target` / `job.bed_target`: Static first-layer targets from
+  Moonraker file metadata `first_layer_extr_temp` / `first_layer_bed_temp`.
+  They are not current temperatures or active heater targets. Null means
+  unavailable; zero is valid (heater off).
+- `job.estimated_time_formatted`: Estimated total duration as `hh:mm:ss`,
+  or null. Hours use at least two digits and do not wrap at 24; fractional
+  seconds round half up to a whole second. `job.estimated_time` preserves
+  Moonraker's seconds for host inspection;
+  raw duration numbers are not transmitted to the MCU.
+- `job.display`: Ready-to-draw strings keyed by `total_layers`,
+  `layer_height`, `estimated_time`, `material`, `filename`, `nozzle_target`,
+  `bed_target`, `nozzle_label`, and `bed_label`, including labels and
+  units. Example: `Layers: 221`, `Height: 0.18mm`, `ETA: 03:29:12`, and
+  `Mat: PETG`. Unknowns contain `--`. Strings reflect GBK replacement
+  and byte-length limits used by the payload. Here ETA means estimated
+  total job duration, not a live remaining time or arrival timestamp.
+- `job.thumbnail`: Null if unavailable; otherwise `path` (relative to the
+  `gcodes` root), source `width`/`height`, `format` (`png` or `jpeg`), and
+  downloaded `size` in bytes. Binary image data is excluded from status.
+  Local G-code extraction reports `source: gcode` and a null `path`.
+- `job.thumbnail.rgb565`: Prepared image `width`/`height` (96x96),
+  `format` (`rgb565be`), original `source_width`/`source_height`, number of
+  output `colors` (including black), and `size` (18432 bytes). Pixel bytes
+  are excluded from status.
+- `job.transfer`: Binary job descriptor with `version`, `format`
+  (`klcd-job-v5`), total `size`, unsigned `crc32`, `chunk_size` (40 bytes),
+  and `chunk_count`. Payload bytes are excluded. This is a prepared
+  application format; the descriptor alone does not indicate a completed
+  transfer. Check `tjc_lcd.rendered` for the last render result.
+- `job.transfer.image`: Null without a thumbnail; otherwise `encoding`
+  (`rects565` or `rgb565be`), encoded `size` including its codec byte,
+  `raw_size` (18432), rectangle count and nonblack color count. For raw
+  fallback, the count describes the candidate rectangles before fallback. Compression preserves the prepared RGB565
+  pixels; the larger source/64-color preparation is separate from transport.
+  `job.filename` preserves the source path; `job.display.filename` hides
+  .gcode/.gco/.g suffixes.
+- `job.warnings`: A list of collection warnings, including unavailable
+  thumbnails. A prepared job may have missing fields or a null thumbnail.
+
+With `auto_prepare: True`, each new virtual SD print prepares a fresh
+snapshot before its first G-code. There are no updates during printing or
+on resume. Later edits to the file are not followed automatically.
+Disconnect and shutdown clear the snapshot; with automatic preparation
+enabled, resetting the selected virtual SD file also clears it.
+
+## tjc_lcd
+
+The fork-specific [tjc_lcd](Config_Reference.md#tjc_lcd) object provides:
+
+- `state`: `disconnected`, `idle`, `initializing`, `clearing`, `rendering`, `ready`,
+  or `error`. `ready` means startup or the latest card checkpoint has
+  completed, including a 50 ms settling interval. It is not a documented
+  panel render acknowledgement or proof of the visible screen content.
+- `error`: Last startup/clear/render error, or null. Errors include handshake
+  timeout, UART framing/noise/overrun or receive-buffer overflow, and
+  missing MCU completion responses, invalid payloads/offsets or CRC errors.
+- `rendered`: True after the last job card passed transfer/CRC validation
+  and its trailing handshake/settling checkpoint. False after startup,
+  clear, a new render, or disconnect. This is not a pixel-level panel ACK.
+- `job_filename`: Filename of that successfully rendered job, otherwise null.
+- `screen`: `blank`, `job`, `idle`, or null while rendering, on error or
+  disconnected. `rendered` is specific to a job card; an idle screen sets
+  `rendered` to False and `job_filename` to null.
+
+Status reads do not issue MCU commands or LCD traffic. A disconnect or
+shutdown sets `disconnected`. Starting a print waits for a pending LCD
+operation and requires `ready`; pause/resume does not repeat initialization.
+
 ## endstop_phase
 
 The following information is available in the

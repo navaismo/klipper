@@ -4907,6 +4907,129 @@ lcd_type:
 ...
 ```
 
+### [lcd_status]
+
+Fork-specific collection of static LCD job data from Moonraker before a print.
+This module prepares metadata, converts PNG/JPEG thumbnails to 96x96 RGB565,
+and builds a binary job payload. With `[tjc_lcd]` also enabled, automatic
+preparation sends the payload to its MCU renderer before printing.
+The data module never opens an LCD serial port or builds LCD frames.
+All labels and numeric text are formatted on the host; the estimated
+total duration uses `hh:mm:ss`. The C driver only draws the strings.
+The card includes the file basename and first-layer nozzle/bed targets from G-code metadata; missing targets
+show `--`. These are static objectives, not current heater readings.
+Pillow is included in `scripts/klippy-requirements.txt`, used by the normal
+host installers and requirement-aware Moonraker updates.
+The Ender-3 V3 SE LCD remains connected to the mainboard USART and needs
+the separate C firmware driver described in [LCD_STATUS_PLAN.md](LCD_STATUS_PLAN.md).
+
+```
+[lcd_status]
+#auto_prepare: True
+#   Prepare fresh job data automatically before a virtual SD print starts.
+#   Runs once per loaded file, not on pause/resume. A metadata error
+#   prevents the print from starting. False enables manual preparation
+#   only. The default is True.
+#moonraker_url: http://127.0.0.1:7125
+#   Moonraker HTTP(S) base URL. A reverse-proxy path prefix is allowed.
+#   The default is the local Moonraker server. Credentials in the URL,
+#   query parameters, and fragments are not accepted.
+#moonraker_api_key:
+#   Optional API key sent in the X-Api-Key header. Empty by default.
+#request_timeout: 3.0
+#   Socket timeout in seconds for each HTTP request. Must be greater
+#   than zero and at most 30. No automatic retries or periodic requests.
+```
+
+With `auto_prepare: True`, `SDCARD_PRINT_FILE` (used by Moonraker) or
+`M23` followed by `M24` prepares data before the first G-code is read.
+No start macro or external script trigger is required. The standalone
+`scripts/lcd_prepare.py` remains a diagnostic tool; the extra invokes the
+shared preparation code directly and keeps the payload in memory.
+Metadata failures stop the start request with a G-code error; missing or
+failed thumbnails produce warnings and allow a text-only payload.
+`LCD_PREPARE FILENAME=parts/cube.gcode` is also available for manual use.
+Preparation is rejected while printing or paused, so this command must
+not be placed inside the printing file's start macro.
+Collection runs through `aio_executor` outside the reactor thread.
+Image conversion requires Pillow in the Klippy Python environment,
+installed through `scripts/klippy-requirements.txt`. It retains the Marlin script's LANCZOS/RGB565 and black-skip rules; v5
+uses 64 palette colors and prefers a source at least 192x192 for downsampling.
+Automatic preparation requires this fork's `virtual_sdcard:before_print`
+event; copying the extra alone into another Klipper tree does not add it.
+`LCD_PREPARE` only collects data. `LCD_RENDER FILENAME=...` collects and
+renders a card while idle without starting a print. Automatic preparation
+also renders when `[tjc_lcd]` is enabled. Rendering failures prevent the
+start request. The idle image is rendered after printing and pending movements finish.
+
+### [tjc_lcd]
+
+Fork-specific driver for the stock Ender-3 V3 SE TJC display,
+connected to the mainboard USART2 on PA2 (TX) / PA3 (RX). Requires an
+STM32F103 firmware build with `CONFIG_TJC_LCD=y`; it is disabled by
+default in `make menuconfig`. USART2 must not be the host communication
+interface. Firmware reserves PA2/PA3 against other configured uses.
+
+```
+[tjc_lcd]
+#mcu: mcu
+#   MCU name, as in [mcu] or the suffix of [mcu name]. Default: mcu.
+#startup_delay: 1.0
+#   Delay in seconds after Klippy requests initialization before sending
+#   the handshake. Range: 0 to 5. Default: 1.0.
+#handshake_timeout: 1.0
+#   Timeout per handshake attempt in seconds. Range: 0.1 to 2.
+#   The MCU makes at most three attempts. Default: 1.0.
+#clear_color: 0
+#   RGB565 background color as an integer from 0 to 65535.
+#   Default: 0 (black).
+```
+
+At `klippy:ready`, this extra requests initialization once through
+Klipper's existing MCU connection. The C driver owns the 115200-baud,
+8N1 UART, frame construction, handshake response parser, and clear
+sequence (`0x40` palette, then bare `0x52`). It uses interrupts and a
+bounded timer/task state machine. It stops the LCD UART and timer after
+success or failure; there is no periodic LCD traffic.
+
+A new virtual SD print waits for initialization or a pending manual clear
+to finish. An LCD error prevents that start request, without shutting down
+Klipper. Retry with `TJC_LCD_INIT` while idle after correcting the problem.
+Initialization/clear commands are rejected while printing or paused.
+Connecting or reconnecting Moonraker alone does not redraw the LCD.
+Startup idle drawing is retained through the intermediate clearing state.
+The idle_timeout:idle event also draws once when ready and neither
+printing nor paused, unless the idle screen is already showing.
+
+This extra is separate from `[lcd_status]`, which prepares job metadata.
+With `[lcd_status]` and its default `auto_prepare: True`, the host sends
+the prepared job in acknowledged 40-byte chunks before the first file
+G-code. The C renderer validates payload v5, lengths/offsets/CRC32, draws
+nine host-formatted GBK strings and the 96x96 thumbnail, then waits for
+a trailing handshake reply and a settling interval. Errors abort the
+start. The card stays static during printing and pauses.
+Job rendering needs firmware with `TJC_JOB_VERSION=5`; rebuild and flash
+after updating the C source, keeping `CONFIG_TJC_LCD=y`. After successful
+startup and completion/cancellation, the idle screen is drawn once. The
+completion callback waits for queued movements and is superseded by a new
+job or disconnect. A subsequent SD file reset from a cancel macro
+queues a replacement idle callback if the job card is still showing. `TJC_LCD_IDLE` tests it manually while idle. Job labels
+are yellow with white values; labels include `Height:` and `Mat:`.
+Layer/height/ETA/material icons are cyan. The display basename omits its
+G-code extension. Image transport uses lossless color-grouped rectangles
+or raw RGB565, whichever is smaller. Metadata and icons are lowered eight
+pixels; labels have an eight-pixel gap after icons and common
+Height values use attached units (for example, 0.18mm) on one row. Long filenames use two balanced
+centered rows, preferring underscores/spaces at the split. Temperature
+degree symbols are drawn as small circles in C because the physical
+panel left the GBK glyph blank; host values remain degrees Celsius.
+The idle logo is rendered after startup and after completion/cancellation,
+once queued movements finish. Pauses and errors preserve the card. The final handshake
+is a protocol checkpoint, not a documented pixel-level panel render ACK.
+See [LCD_STATUS_PLAN.md](LCD_STATUS_PLAN.md) for staged testing and rollback.
+Do not add this section to a running installation before deploying the
+matching host module and MCU firmware.
+
 ### [display_data]
 
 Support for displaying custom data on an lcd screen. One may create

@@ -78,6 +78,7 @@ serial-src-$(CONFIG_MACH_STM32G0) := stm32/stm32f0_serial.c
 serial-src-$(CONFIG_MACH_STM32G4) := stm32/stm32f0_serial.c
 serial-src-$(CONFIG_MACH_STM32H7) := stm32/stm32f0_serial.c
 src-$(CONFIG_SERIAL) += $(serial-src-y) generic/serial_irq.c
+src-$(CONFIG_TJC_LCD) += tjc_lcd.c tjc_job.c stm32/tjc_uart.c
 usb-src-$(CONFIG_HAVE_STM32_USBFS) := stm32/usbfs.c
 usb-src-$(CONFIG_HAVE_STM32_USBOTG) := stm32/usbotg.c
 src-$(CONFIG_USBSERIAL) += $(usb-src-y) stm32/chipid.c generic/usb_cdc.c

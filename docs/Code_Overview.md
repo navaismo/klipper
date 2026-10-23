@@ -34,6 +34,17 @@ compiling the micro-controller code.
 
 The **test/** directory contains automated test cases.
 
+In this fork, **src/tjc_lcd.c** owns the mainboard-connected TJC LCD
+startup protocol. **src/stm32/tjc_uart.c** owns its dedicated USART2
+interrupts and queues. The optional **klippy/extras/tjc_lcd.py** module
+requests handshake/clear at `klippy:ready`, receives MCU status through
+`register_serial_response()`, and publishes it on the reactor thread.
+It waits for a pending operation before virtual SD printing starts.
+This is separate from **klippy/extras/lcd_status.py**, which prepares
+metadata and pixels, then delegates rendering before the first file G-code.
+**src/tjc_job.c** incrementally validates the payload and renders text and
+RGB565 spans using two rows of runs, avoiding a full MCU framebuffer.
+
 During compilation, the build may create an **out/** directory. This
 contains temporary build time objects. The final micro-controller
 object that is built is **out/klipper.elf.hex** on AVR and
@@ -306,6 +317,15 @@ The following may also be useful:
     have completed successfully. It indicates the printer is
     transitioning to a state ready to handle normal operations. Do not
     raise an error in this callback.
+  This fork also provides `virtual_sdcard:before_print(filename)`. It is
+  emitted synchronously once per loaded file before the virtual SD work
+  timer starts, including both `SDCARD_PRINT_FILE` and `M23`/`M24` starts.
+  The filename is relative to the virtual SD root with resolved casing.
+  Handlers may yield to the reactor and raise a `gcode.error` to prevent
+  the start; they must not change the selected file or its position.
+  A failed preparation can be retried with `M24`. Successful pause/resume
+  cycles do not emit the event again. The LCD extra uses it to prepare
+  metadata and images before executing any file G-code.
 * If there is an error in the user's config, be sure to raise it
   during the `load_config()` or "connect event" phases. Use either
   `raise config.error("my error")` or `raise printer.config_error("my

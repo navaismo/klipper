@@ -340,6 +340,80 @@ Also provided is the following extended G-Code command:
   setting the supplied `MSG` as the current display message.  If
   `MSG` is omitted the display will be cleared.
 
+### [lcd_status]
+
+The following fork-specific command is available when an
+[lcd_status config section](Config_Reference.md#lcd_status) is enabled.
+By default it also prepares fresh data automatically before
+`SDCARD_PRINT_FILE` or the first `M24` after selecting a file, without
+repeating on pause/resume. Set `auto_prepare: False` for manual use only.
+
+#### LCD_PREPARE
+
+`LCD_PREPARE FILENAME=<path>`: Query Moonraker once for the named file's
+total layers, layer height, estimated total time, material, thumbnail,
+and first-layer nozzle/bed targets. The basename is included in the card.
+The filename is relative to Moonraker's `gcodes` root. This prepares a
+snapshot, a 96x96 RGB565 thumbnail, and a versioned binary transfer payload
+in host memory. It reports a JSON summary without image or payload bytes.
+The host formats labels, units, and estimated duration as `hh:mm:ss` into
+`job.display`; the MCU receives these strings ready for drawing.
+It does not send anything to the MCU/LCD or start a print.
+
+Manual preparation is optional with automatic preparation enabled.
+Run before starting the print, not from the printing file's start macro.
+An active or paused print rejects the request. A failed collection clears
+the previous snapshot; missing individual fields remain unknown. A missing
+or failed thumbnail/conversion produces a warning while preserving textual
+metadata and a text-only payload. Pillow is required for image conversion
+and is included in the normal Klippy requirements for installers and managed updates.
+See [LCD_STATUS_PLAN.md](LCD_STATUS_PLAN.md) for offline inspection.
+
+#### LCD_RENDER
+
+`LCD_RENDER FILENAME=<path>`: Prepare metadata/thumbnail and render the
+static card without starting a print. Requires both `[lcd_status]` and
+`[tjc_lcd]`, matching job-render MCU firmware, and an idle printer.
+The command waits for acknowledged transfer, CRC validation and the MCU's
+final protocol checkpoint. Missing thumbnails retain the text-only
+fallback. Output explicitly reports whether a 96x96 thumbnail was included
+and displays preparation warnings; automatic preparation logs warnings
+in `klippy.log`. When automatic preparation is enabled, the same render path
+runs before the first file G-code; no `START_PRINT` macro change is needed.
+
+### [tjc_lcd]
+
+The following fork-specific commands require the
+[tjc_lcd config section](Config_Reference.md#tjc_lcd) and matching MCU
+firmware. Both require an idle printer and reject printing/paused jobs.
+They return when the request is sent; inspect `tjc_lcd.state` for completion.
+
+#### TJC_LCD_INIT
+
+`TJC_LCD_INIT`: Request the mainboard C driver to initialize USART2,
+perform the LCD handshake, clear, and then schedule the idle screen.
+This also happens automatically once at `klippy:ready`. An operation in
+progress rejects a second manual request. It can be used to retry after
+a handshake failure while idle.
+
+#### TJC_LCD_CLEAR
+
+`TJC_LCD_CLEAR [COLOR=<integer>]`: Request a clear after initialization
+has succeeded. COLOR is an RGB565 integer from 0 to 65535; it defaults
+to the configured `clear_color`. This only clears the screen; it does
+not send job text or thumbnails. Do not put these commands inside the
+printing file or its start/end macros.
+
+#### TJC_LCD_IDLE
+
+`TJC_LCD_IDLE`: Render the static idle logo, printer name, repository URL
+and Idle indicator without starting a print. Requires ready Klipper,
+matching v5 MCU firmware, and an idle/unpaused printer. It waits for queued
+movements and the final render checkpoint. This screen also appears once
+after startup initialization and after completion/cancellation once motion
+has finished. Pauses and errors preserve the job card. Labels on the job
+card are yellow; values remain white, and layer height uses `L. Height:`.
+
 ### [dual_carriage]
 
 The following command is available when the

@@ -64,6 +64,8 @@ communication with the Klipper developers.
 
 - [Code overview](Code_Overview.md): Developers should read this
   first.
+- [LCD status project](LCD_STATUS_PLAN.md): Fork-specific static LCD
+  architecture and host data preparation for the Ender-3 V3 SE.
 - [Kinematics](Kinematics.md): Technical details on how Klipper
   implements motion.
 - [Protocol](Protocol.md): Information on the low-level messaging
