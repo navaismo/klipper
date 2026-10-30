@@ -14,8 +14,6 @@ from . import cs1237
 from . import ads131m0x
 from . import probe, manual_probe, trigger_analog, load_cell
 
-np = None  # delay NumPy import until configuration time
-
 # MCU SOS filter scaled to "fractional grams" for consistent sensor precision
 FRAC_GRAMS_CONV = 32768.0
 
@@ -28,14 +26,13 @@ ASCENT_DATA_WINDOW_SECONDS = 0.3
 
 class TapAnalysis:
     def __init__(self, samples):
-        nd_samples = np.asarray(samples, dtype=np.float64)
-        self.time = nd_samples[:, 0]
-        self.force = nd_samples[:, 1]
+        self.time = [float(s[0]) for s in samples]
+        self.force = [float(s[1]) for s in samples]
 
     # convert to dictionary for JSON encoder
     def to_dict(self):
         return {
-            'time': self.time.tolist(), 'force': self.force.tolist(),
+            'time': self.time, 'force': self.force,
             'is_valid': True,
         }
 
@@ -281,10 +278,11 @@ class LoadCellProbeConfigHelper:
     def get_safety_limit_grams(self, gcmd=None):
         return self._force_safety_limit_param.get(gcmd)
 
-    def get_safety_range(self, gcmd=None):
+    def get_safety_range(self, gcmd=None, reference_tare_counts=None):
         counts_per_gram = self._load_cell.get_counts_per_gram()
         # calculate the safety band
-        zero = self._load_cell.get_reference_tare_counts()
+        zero = self._load_cell.get_reference_tare_counts() \
+            if reference_tare_counts is None else reference_tare_counts
         safety_counts = int(counts_per_gram * self.get_safety_limit_grams(gcmd))
         safety_min = int(zero - safety_counts)
         safety_max = int(zero + safety_counts)
@@ -309,7 +307,7 @@ class LoadCellProbeConfigHelper:
 # Execute probing moves using the MCU_trigger_analog
 class LoadCellProbingMove:
     def __init__(self, config, load_cell_inst, mcu_trigger_analog, param_helper,
-            continuous_tare_filter_helper, config_helper):
+            continuous_tare_filter_helper, config_helper, log_trace=False):
         self._printer = config.get_printer()
         self._load_cell = load_cell_inst
         self._mcu_trigger_analog = mcu_trigger_analog
@@ -322,6 +320,68 @@ class LoadCellProbingMove:
         probe.LookupZSteppers(config, dispatch.add_stepper)
         # internal state tracking
         self._tare_counts = 0
+        self._log_trace = log_trace
+        self._name = config.get_name()
+        self._last_safety = None
+        self._safety_reference_counts = None
+
+    def set_safety_reference(self, reference_counts):
+        # A caller may anchor a point after retracting into unloaded clearance.
+        if math.isnan(reference_counts) or math.isinf(reference_counts):
+            raise self._printer.command_error("Invalid load cell point tare")
+        reference_counts = int(reference_counts)
+        self._config_helper.get_safety_range(
+            reference_tare_counts=reference_counts)
+        self._safety_reference_counts = reference_counts
+
+    def clear_safety_reference(self):
+        self._safety_reference_counts = None
+
+    def _compression_margin(self, tare_counts, safety_min, safety_max):
+        counts = safety_max - tare_counts
+        if self._load_cell.invert < 0:
+            counts = tare_counts - safety_min
+        return counts / self._load_cell.get_counts_per_gram()
+
+    def _log_safety(self, tare_counts, safety_min, safety_max, gcmd):
+        scale = self._load_cell.get_counts_per_gram()
+        reference = self._load_cell.get_reference_tare_counts()
+        toolhead = self._printer.lookup_object('toolhead')
+        self._last_safety = {
+            'name': self._name, 'reference_tare_counts': reference,
+            'position': toolhead.get_position()[:3],
+            'tare_counts': tare_counts, 'counts_per_gram': scale,
+            'safety_reference_counts': reference
+                if self._safety_reference_counts is None
+                else self._safety_reference_counts,
+            'orientation': self._load_cell.invert,
+            'raw_min': safety_min, 'raw_max': safety_max,
+            'baseline_force': self._load_cell.invert
+                * (tare_counts - reference) / scale,
+            'margin_to_raw_min_grams': (tare_counts - safety_min) / scale,
+            'margin_to_raw_max_grams': (safety_max - tare_counts) / scale,
+            'compression_margin_grams': self._compression_margin(
+                tare_counts, safety_min, safety_max),
+            'trigger_force': self._config_helper.get_trigger_force_grams(gcmd),
+            'force_safety_limit':
+                self._config_helper.get_safety_limit_grams(gcmd)}
+        logging.info("Load cell safety: %s", json.dumps(self._last_safety))
+
+    def _log_probe_failure(self, exc, results):
+        samples, errors = results
+        raw = [s[2] for s in samples]
+        stride = max(1, (len(samples) + 255) // 256)
+        selected = samples[::stride]
+        if samples and selected[-1] != samples[-1]:
+            selected.append(samples[-1])
+        report = {'name': self._name, 'error': str(exc),
+            'safety': self._last_safety, 'sample_count': len(samples),
+            'sensor_errors': errors, 'stride': stride,
+            'observed_raw_min': min(raw) if raw else None,
+            'observed_raw_max': max(raw) if raw else None,
+            'time_counts': [[s[0], s[2]] for s in selected]}
+        # Host bulk samples may omit the exact sample which stopped the MCU.
+        logging.info("Load cell probe failure: %s", json.dumps(report))
 
     def _start_collector(self):
         toolhead = self._printer.lookup_object('toolhead')
@@ -335,18 +395,41 @@ class LoadCellProbingMove:
     # pauses for the last move to complete and then
     # sets the endstop tare value and range
     def _pause_and_tare(self, gcmd):
+        self._last_safety = None
+        if not self._load_cell.is_calibrated():
+            raise self._printer.command_error("Load Cell not calibrated")
         collector = self._start_collector()
         num_samples = self._config_helper.get_tare_samples(gcmd)
         # use collect_min collected samples are not wasted
-        results = collector.collect_min(num_samples)
+        try:
+            results = collector.collect_min(num_samples)
+        finally:
+            collector.stop_collecting()
         tare_samples = check_sensor_errors(results, self._printer)
-        tare_counts = np.average(np.array(tare_samples)[:, 2].astype(float))
+        if len(tare_samples) < num_samples and not self._mcu.is_fileoutput():
+            raise self._printer.command_error(
+                "Insufficient load cell tare data")
+        tare_counts = load_cell.avg([float(s[2]) for s in tare_samples])
         # update sos_filter with any gcode parameter changes
         self._continuous_tare_filter_helper.update_from_command(gcmd)
         # update the load cell so it reflects the new tare value
-        self._load_cell.tare(tare_counts)
         # update raw range
-        safety_min, safety_max = self._config_helper.get_safety_range(gcmd)
+        safety_min, safety_max = self._config_helper.get_safety_range(
+            gcmd, reference_tare_counts=self._safety_reference_counts)
+        if self._log_trace:
+            self._log_safety(tare_counts, safety_min, safety_max, gcmd)
+        if not safety_min < tare_counts < safety_max:
+            raise self._printer.command_error(
+                "Load cell tare outside force limit")
+        margin = self._compression_margin(tare_counts, safety_min, safety_max)
+        trigger = self._config_helper.get_trigger_force_grams(gcmd)
+        if margin <= trigger:
+            raise self._printer.command_error(
+                "Insufficient load cell compression margin: %.2f g available, "
+                "%.2f g trigger; force limit unchanged"
+                % (margin, trigger))
+        self._load_cell.tare(tare_counts)
+        self._tare_counts = int(tare_counts)
         self._mcu_trigger_analog.set_raw_range(safety_min, safety_max)
         # update internal tare value
         gpc = self._config_helper.get_grams_per_count() * FRAC_GRAMS_CONV
@@ -373,7 +456,16 @@ class LoadCellProbingMove:
         # start collector after tare samples are consumed
         collector = self._start_collector()
         # do homing move
-        epos = phoming.probing_move(self._mcu_trigger_analog, pos, speed)
+        try:
+            epos = phoming.probing_move(self._mcu_trigger_analog, pos, speed)
+        except Exception as exc:
+            try:
+                results = collector.stop_collecting()
+                if self._log_trace:
+                    self._log_probe_failure(exc, results)
+            except Exception:
+                logging.exception("Unable to collect load-cell failure data")
+            raise
         return epos, collector
 
     # Wait for the MCU to trigger with no movement
@@ -394,13 +486,20 @@ class LoadCellProbingMove:
 
 # Perform a single complete tap
 class TappingMove:
-    def __init__(self, config, load_cell_probing_move, config_helper):
+    def __init__(self, config, load_cell_probing_move, config_helper,
+                 ascent_sample_time=ASCENT_DATA_WINDOW_SECONDS,
+                 log_trace=False):
         self._printer = config.get_printer()
         self._load_cell_probing_move = load_cell_probing_move
         self._config_helper = config_helper
+        self._ascent_sample_time = ascent_sample_time
+        self._log_trace = log_trace
+        self._name = config.get_name()
         # track results of the last tap
         self._last_result = None
+        self._last_trigger_z = None
         self._is_last_result_valid = False
+        self._collector = None
         # webhooks support
         self._clients = load_cell.ApiClientHelper(config.get_printer())
         name = config.get_name()
@@ -410,8 +509,21 @@ class TappingMove:
         self._best_fit = LCBestFit(self._printer)
 
     def run_tap(self, gcmd):
+        self._is_last_result_valid = False
+        self._last_result = None
+        self._last_trigger_z = None
+        try:
+            return self._run_tap(gcmd)
+        finally:
+            if self._collector is not None:
+                self._collector.stop_collecting()
+                self._collector = None
+
+    def _run_tap(self, gcmd):
         # do the descending move
         epos, collector = self._load_cell_probing_move.probing_move(gcmd)
+        self._collector = collector
+        self._last_trigger_z = epos[2]
         # collect samples from the tap
         toolhead = self._printer.lookup_object('toolhead')
         # Homing workaround
@@ -458,26 +570,42 @@ class TappingMove:
     def get_status(self, eventtime):
         return {
             'last_z_result': self._last_result,
+            'last_trigger_z': self._last_trigger_z,
             'is_last_tap_valid': self._is_last_result_valid
         }
 
     def _analyze_ascent(self, gcmd, all_samples, ascent_start_time, toolhead,
                         raw_z):
-        # Collect samples actually belonging to the ascent. We use a limited
-        # time window to minimise the influence of baseline wandering.
+        # Bound the ascent fit window to limit baseline drift. Slow contact
+        # release can require a longer window to include unloaded samples.
         data = []
+        sample_times = []
         for s in all_samples:
             if s[0] >= ascent_start_time and \
-               s[0] <= ascent_start_time + ASCENT_DATA_WINDOW_SECONDS:
+               s[0] <= ascent_start_time + self._ascent_sample_time:
                 data.append((s[1], _lookup_z_pos(toolhead, s[0])))
+                sample_times.append(s[0])
 
         if self._load_cell_probing_move._mcu.is_fileoutput():
             # In debugging mode: inject dummy data
             data = [(0.0, 0.0), (10.0, 0.1), (20.0, 0.2), (25.0, 0.3),
                     (25.0, 0.4), (25.0, 0.5)]
 
-        # Log ascent data in JSON format for easy debugging
-        #logging.info("Load cell probe ascent data: %s", json.dumps(data))
+        if self._log_trace:
+            # Keep the complete 80 SPS trace; bound logs for faster sensors.
+            stride = max(1, (len(data) + 4094) // 4095)
+            trace = data[::stride]
+            times = (sample_times[::stride]
+                     if len(sample_times) == len(data) else None)
+            if data and (len(data) - 1) % stride:
+                trace.append(data[-1])
+                if times is not None:
+                    times.append(sample_times[-1])
+            logging.info("Load cell ascent: %s", json.dumps({
+                'name': self._name, 'raw_z': raw_z,
+                'start_time': ascent_start_time,
+                'sample_count': len(data), 'stride': stride,
+                'force_z': trace, 'sample_times': times}))
 
         # Check that we have enough samples early to avoid exceptions
         if len(data) < 2*FIT_MIN_POINTS:
@@ -485,9 +613,25 @@ class TappingMove:
                 "Insufficient ascent samples (%d total, need >= %d "
                 "each) for piecewise fit" % (len(data), 2*FIT_MIN_POINTS))
 
+        if any(math.isnan(v) or math.isinf(v) for row in data for v in row):
+            raise self._printer.command_error("Non-finite load cell tap data")
+
         # Perform the actual fit
         z_contact, below_count, above_count, depress_slope = \
             self._best_fit.find_best_fit(data)
+
+        if self._log_trace:
+            logging.info("Load cell fit: %s", json.dumps({
+                'name': self._name, 'raw_z': raw_z, 'contact_z': z_contact,
+                'release_distance': z_contact - raw_z,
+                'below_count': below_count, 'above_count': above_count,
+                'slope': depress_slope}))
+
+        if (math.isnan(z_contact) or math.isinf(z_contact)
+                or math.isnan(depress_slope) or math.isinf(depress_slope)
+                or depress_slope >= 0.
+                or not data[0][1] < z_contact < data[-1][1]):
+            raise self._printer.command_error("Invalid load cell contact fit")
 
         # We require at least 3 samples on each side of the split point to
         # ensure a good fit and precise tare compensation.
@@ -496,13 +640,6 @@ class TappingMove:
                 "Insufficient ascent samples (%d below, %d above, need >= %d "
                 "each) for piecewise fit" % (below_count, above_count,
                                              FIT_MIN_POINTS))
-
-        # gcmd.respond_info("Load cell probe fit: n_below=%d n_above=%d"
-        #                   " z_contact=%.4f raw=%.4f delta=%.4f"
-        #                   " depress_slope=%.4f" % (
-        #                   below_count, above_count, z_contact, raw_z,
-        #                   raw_z - z_contact, depress_slope))
-
         if self._load_cell_probing_move._mcu.is_fileoutput():
             # In debugging mode: check fit result
             if abs(z_contact - 0.25) > 0.01:
@@ -552,41 +689,61 @@ class LCBestFit:
         base_grams = .5 * (data[0][0] + data[-1][0])
         samples = [(d[1] - base_z, d[0] - base_grams) for d in data]
 
-        def _run_fit(sample_set):
-            """Run the binary search fit on the given sample set."""
-            min_z = best_z = sample_set[0][0]
-            max_z = sample_set[-1][0]
-            best_err = sys.float_info.max
-            best_coeffs = [[0.]]*2
-            while max_z - min_z > 0.000050:
-                mid_z = (min_z + max_z) * .5
-                if best_z < mid_z:
-                    guess_z = (best_z + max_z) * .5
-                else:
-                    guess_z = (min_z + best_z) * .5
-                guess_err, guess_coeffs = \
-                    self._calc_least_squares(sample_set, guess_z)
-                if guess_err < best_err:
-                    if guess_z > best_z:
-                        min_z = best_z
-                    else:
-                        max_z = best_z
-                    best_z = guess_z
-                    best_err = guess_err
-                    best_coeffs = guess_coeffs
-                else:
-                    if guess_z > best_z:
-                        max_z = guess_z
-                    else:
-                        min_z = guess_z
-            return best_z, best_coeffs
+        count = len(samples)
+        total_y = sum(y for z, y in samples)
+        best = [sys.float_info.max, None, 0.]
 
-        est_z, coeffs = _run_fit(samples)
+        def consider(contact, n, sx, sy, sxx, sxy):
+            # Solve the original two-coefficient hinge model from prefix
+            # sums. The omitted sum(y*y) is constant for all candidates.
+            sh = sx - n * contact
+            shh = sxx - 2. * contact * sx + n * contact * contact
+            shy = sxy - contact * sy
+            variance = shh - sh * sh / count
+            if variance <= 0.:
+                return
+            slope = (shy - sh * total_y / count) / variance
+            baseline = (total_y - slope * sh) / count
+            error = -(baseline * total_y + slope * shy)
+            if error < best[0]:
+                best[:] = [error, contact, slope]
+
+        sx = sy = sxx = sxy = 0.
+        for index in range(count - 1):
+            z, y = samples[index]
+            sx += z
+            sy += y
+            sxx += z * z
+            sxy += z * y
+            n = index + 1
+            upper = samples[index + 1][0]
+            if upper < z:
+                raise self._printer.command_error(
+                    "Non-monotonic load cell ascent positions")
+            if upper == z:
+                continue
+            consider(z, n, sx, sy, sxx, sxy)
+            consider(upper, n, sx, sy, sxx, sxy)
+            # Within this split, the unconstrained optimum is the
+            # intersection of the loaded regression and unloaded mean.
+            # An optimum outside the interval lies at one of its ends.
+            variance = sxx - sx * sx / n
+            if variance <= 0.:
+                continue
+            slope = (sxy - sx * sy / n) / variance
+            if not slope:
+                continue
+            free_mean = (total_y - sy) / (count - n)
+            contact = sx / n + (free_mean - sy / n) / slope
+            if z <= contact <= upper:
+                consider(contact, n, sx, sy, sxx, sxy)
+
+        if best[1] is None:
+            raise self._printer.command_error("Invalid load cell contact fit")
+        est_z, depress_slope = best[1:]
 
         # Count number of samples below the estimated z_contact
-        n_below = len(sorted([s for s in samples if s[0] <= est_z],
-                       key=lambda s: abs(s[0] - est_z)))
-        depress_slope = coeffs[1][0]
+        n_below = sum(1 for z, y in samples if z <= est_z)
 
         return base_z + est_z, n_below, len(samples) - n_below, depress_slope
 
@@ -661,14 +818,31 @@ class LoadCellParameterHelper:
         return params
 
 
+class LoadCellTapHelper:
+    """Build the contact engine without creating a sensor or primary probe."""
+    def __init__(self, config, load_cell_inst,
+                 ascent_sample_time=ASCENT_DATA_WINDOW_SECONDS,
+                 log_trace=False):
+        self.load_cell = load_cell_inst
+        sensor = load_cell_inst.get_sensor()
+        self.mcu = sensor.get_mcu()
+        config_helper = LoadCellProbeConfigHelper(config, load_cell_inst)
+        self.trigger = trigger_analog.MCU_trigger_analog(sensor)
+        cmd_queue = self.trigger.get_dispatch().get_command_queue()
+        sos_filter = trigger_analog.MCU_SosFilter(self.mcu, cmd_queue, 4)
+        self.trigger.setup_sos_filter(sos_filter)
+        filter_helper = ContinuousTareFilterHelper(config, sensor, sos_filter)
+        self.param_helper = LoadCellParameterHelper(config)
+        self.probing_move = LoadCellProbingMove(
+            config, load_cell_inst, self.trigger, self.param_helper,
+            filter_helper, config_helper, log_trace=log_trace)
+        self.tapping_move = TappingMove(config, self.probing_move,
+                                       config_helper, ascent_sample_time,
+                                       log_trace)
+
+
 class LoadCellPrinterProbe:
     def __init__(self, config):
-        cfg_error = config.error
-        try:
-            global np
-            import numpy as np
-        except:
-            raise cfg_error("[load_cell_probe] requires the NumPy module")
         self._printer = config.get_printer()
         # Sensor types supported by load_cell_probe
         sensors = {}
@@ -680,23 +854,15 @@ class LoadCellPrinterProbe:
         sensor = sensor_class(config)
         self._load_cell = load_cell.LoadCell(config, sensor)
         # Read all user configuration and build modules
-        config_helper = LoadCellProbeConfigHelper(config, self._load_cell)
-        self._mcu = self._load_cell.get_sensor().get_mcu()
-        self._mcu_trigger_analog = trigger_analog.MCU_trigger_analog(sensor)
-        cmd_queue = self._mcu_trigger_analog.get_dispatch().get_command_queue()
-        sos_filter = trigger_analog.MCU_SosFilter(self._mcu, cmd_queue, 4)
-        self._mcu_trigger_analog.setup_sos_filter(sos_filter)
-        continuous_tare_filter_helper = ContinuousTareFilterHelper(
-            config, sensor, sos_filter)
+        tap_helper = LoadCellTapHelper(config, self._load_cell)
+        self._mcu = tap_helper.mcu
+        self._mcu_trigger_analog = tap_helper.trigger
         # Probe Interface
-        self._param_helper = LoadCellParameterHelper(config)
+        self._param_helper = tap_helper.param_helper
         self._cmd_helper = probe.ProbeCommandHelper(config, self)
         self._probe_offsets = probe.ProbeOffsetsHelper(config)
-        load_cell_probing_move = LoadCellProbingMove(config, self._load_cell,
-            self._mcu_trigger_analog, self._param_helper,
-            continuous_tare_filter_helper, config_helper)
-        self._tapping_move = TappingMove(config, load_cell_probing_move,
-            config_helper)
+        load_cell_probing_move = tap_helper.probing_move
+        self._tapping_move = tap_helper.tapping_move
         tap_session = TapSession(config, self._tapping_move,
                                  self._probe_offsets, self._param_helper)
         self._probe_session = probe.SampleAveragingHelper(config,

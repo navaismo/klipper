@@ -44,6 +44,12 @@ This is separate from **klippy/extras/lcd_status.py**, which prepares
 metadata and pixels, then delegates rendering before the first file G-code.
 **src/tjc_job.c** incrementally validates the payload and renders text and
 RGB565 spans using two rows of runs, avoiding a full MCU framebuffer.
+**src/tjc_canvas.c** adds bounded coordinate-based rectangle/text sessions
+for partial updates, under a separate TJC_CANVAS_VERSION capability. Host
+**lcd_canvas.py** prepares the Z-offset phase layout. MCU code validates
+bounds, fonts, GBK, ownership and operation order and retains UART/framing.
+Both render paths stop their timers/UART after a final handshake/settling
+checkpoint; the calibration phase view updates before measurement only.
 
 During compilation, the build may create an **out/** directory. This
 contains temporary build time objects. The final micro-controller

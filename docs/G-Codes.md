@@ -385,8 +385,8 @@ runs before the first file G-code; no `START_PRINT` macro change is needed.
 
 The following fork-specific commands require the
 [tjc_lcd config section](Config_Reference.md#tjc_lcd) and matching MCU
-firmware. Both require an idle printer and reject printing/paused jobs.
-They return when the request is sent; inspect `tjc_lcd.state` for completion.
+firmware. They require an idle printer and reject printing/paused jobs.
+INIT/CLEAR return when sent; IDLE/RECT wait for the final render checkpoint.
 
 #### TJC_LCD_INIT
 
@@ -404,15 +404,38 @@ to the configured `clear_color`. This only clears the screen; it does
 not send job text or thumbnails. Do not put these commands inside the
 printing file or its start/end macros.
 
+#### TJC_LCD_RECT
+
+`TJC_LCD_RECT X0=<x> Y0=<y> X1=<x> Y1=<y> COLOR=<integer>`:
+Fill an inclusive rectangle without clearing the screen, using logical
+240x320 coordinates (X 0..239, Y 0..319, X0<=X1, Y0<=Y1). COLOR is a decimal
+RGB565 integer 0..65535. Filling with the region's background color erases
+only that region. For example, `TJC_LCD_RECT X0=20 Y0=100 X1=90 Y1=120 COLOR=34`
+uses the calibration background. Requires TJC_CANVAS_VERSION=1 mainboard
+firmware and an idle/unpaused printer with no calibration in progress.
+Wait for queued motion and the final handshake/settling checkpoint before
+returning; `tjc_lcd.screen` becomes `custom`. Do not use during printing.
+
 #### TJC_LCD_IDLE
 
-`TJC_LCD_IDLE`: Render the static idle logo, printer name, repository URL
+`TJC_LCD_IDLE`: Render the static idle logo, printer name, reported MCU firmware
 and Idle indicator without starting a print. Requires ready Klipper,
 matching v5 MCU firmware, and an idle/unpaused printer. It waits for queued
 movements and the final render checkpoint. This screen also appears once
 after startup initialization and after completion/cancellation once motion
 has finished. Pauses and errors preserve the job card. Labels on the job
-card are yellow; values remain white, and layer height uses `L. Height:`.
+card are yellow; values remain white, and layer height uses `Height:`.
+The idle firmware line uses the connected display MCU's identification
+version rather than local build files. With TJC_IDLE_VERSION=1 firmware,
+normal builds show `FW <revision> <YYYYMMDD_HHMMSS>` centered at y304 in the
+panel-verified 8x16 font and keep the full repository URL at its original
+x12/y207 in the same font. Branding/model remain unchanged; Idle moves to y276
+to leave space above the footer. With older v5 firmware, the URL stays in place
+and the model line shows `<revision> <MMDD_HHMMSS>` to fit its 20 cells.
+This compatibility mode still identifies the loaded build without flashing.
+No canvas/coordinate diagnostics are displayed; missing identity shows
+`FW: unknown`. The new footer placement requires a mainboard firmware update;
+the panel firmware is unchanged.
 
 ### [dual_carriage]
 
@@ -985,6 +1008,13 @@ The following commands are enabled if a
 seconds of load cell data and reports statistics that can help you verify proper
 operation of the load cell. This command can be run on both calibrated and
 uncalibrated load cells.
+It also reports raw minimum/mean/maximum counts. With a calibrated sensor,
+it reports mean force relative to the saved reference_tare_counts, using the
+configured sensor orientation, and peak-to-peak noise in grams. These force
+statistics describe the collected samples; existing error and saturation
+reports still determine whether the acquisition is usable. The reference
+statistic is independent of the current local tare. The command does not
+move, heat, tare, recalibrate, arm an analog trigger or stage an offset.
 
 ### LOAD_CELL_CALIBRATE
 `LOAD_CELL_CALIBRATE [LOAD_CELL=<config_name>]`: Start the guided calibration
@@ -1008,6 +1038,142 @@ force in grams is also reported.
 This command takes a reading from the load cell. The response is the percentage
 of the sensors range that was read and the raw value in counts. If the load cell
 is calibrated a force in grams is also reported.
+
+### [auto_z_offset]
+
+The fork's [auto_z_offset](Config_Reference.md#auto_z_offset) extra calibrates
+the existing CR Touch probe using a named load cell. It has no automatic
+print-start, startup or idle trigger. All contact commands move the printer
+and heat the bed/nozzle; perform the staged qualification in
+[Automatic Z-offset](AUTO_Z_OFFSET_PLAN.md) before using them.
+
+#### AUTO_Z_OFFSET
+
+`AUTO_Z_OFFSET [BED_TEMP=<degrees>] [NOZZLE_TEMP=<degrees>]`:
+Run the two-point workflow with one command. Require exactly two configured
+`probe_points`, an idle printer and a calibrated sensor. Warm up once, clear
+the active mesh (when bed_mesh is configured), run a full G28 even if already
+homed, and verify readiness/geometry/temperature again. The mesh is cleared
+before G28 so its travel does not use the previous print's compensation.
+Then perform one fresh supervised CR Touch/nozzle pair at
+P1 and then P2, and only if both pass take three new pairs at each point.
+The two preliminary pairs do not enter the six-pair calibration report.
+These are distinct test and calibration stages. Multiple CR Touch readings
+within each pair follow the probe's configured sample count and are not
+additional contact tests. A failed test prevents entry into calibration;
+a failed calibration pair stops the remaining sequence.
+Apply the same local/spatial checks as AUTO_Z_OFFSET_CALIBRATE. The candidate
+is P1's median; P2 only validates agreement. No offset is applied or saved.
+
+On failure, stop the sequence and report the stage, point/pair and original
+error. Spatial rejection retains both point reports without a candidate.
+Restore previous heater targets and retain the existing probe offset.
+No separate G28 or BED_MESH_CLEAR is needed for this command. Targets default
+to 50 C bed and 170 C nozzle unless configured otherwise in `[auto_z_offset]`;
+BED_TEMP/NOZZLE_TEMP explicitly override them. The cleared mesh stays cleared.
+This command does not alter print-start or KAMP macros. Acceptance and
+SAVE_CONFIG remain separate user actions.
+
+With `[tjc_lcd]` and firmware advertising TJC_CANVAS_VERSION=1, all three
+measurement commands show the calibration layout. Highlight CR Touch Reference
+before the CR Touch reading, Nozzle Contact before baseline/tare/contact,
+and Computing Offset for final candidate validation. The host supplies bounded
+drawing coordinates and text; the MCU owns framing and USART2. Draw the screen
+once, then repaint only changed rows and the small status strip. Each partial
+update and final fence finish before measurements. No periodic animation or
+LCD traffic runs during acquisition/fit. The panel firmware is unchanged;
+the mainboard firmware must be rebuilt/flashed once for the coordinate API.
+Without that capability, calibration can run with a console warning and no
+LCD changes; there is no fallback to blinking full-card redraws.
+
+#### AUTO_Z_OFFSET_TEST_CONTACT
+
+`AUTO_Z_OFFSET_TEST_CONTACT [POINT=<index>] [BED_TEMP=<degrees>]
+[NOZZLE_TEMP=<degrees>]`:
+Perform one supervised CR Touch/nozzle pair using the MCU analog trigger and
+existing contact estimator. POINT is the one-based configured point index
+(default 1). Every configured location requires a successful supervised test
+before calibration. Qualification is invalidated by homing, changed probe or
+sensor calibration references, disconnect or a failed contact run.
+No offset is staged or saved. Require homed XYZ, a clean nozzle, a clear
+contact area, a calibrated sensor and an inactive bed mesh.
+After CR Touch measurement, warm-up and a drained move to nozzle clearance,
+capture an unloaded point reference using the existing ADC averaging API.
+The raw force-safety band uses that reference for this test. CALIBRATE retains
+one such reference across all three pairs at each point (five in legacy mode),
+so per-contact tares cannot move the protection between repetitions. The
+shared engine checks remaining compression margin before each approach;
+insufficient margin rejects it. Force limits and saved calibration are
+unchanged. This point-reference policy is specific to Auto Z-offset;
+the generic load_cell_probe keeps its saved-reference safety policy.
+The log records saved/point/local references, raw bounds and margin, plus
+bounded raw samples available after an approach fails. Host samples may omit
+the exact sample that stopped the MCU; RAW_RANGE itself confirms a crossing.
+The ascent estimator uses up to five seconds of the acquired release move
+so slow lifts can include unloaded samples. It still rejects fits without
+at least three samples on each side of contact; no automatic retry is made.
+The shared fit searches all split intervals of its existing piecewise model
+and requires decreasing force during release. This command automatically
+records replayable force/Z diagnostics in the Klippy log without requesting
+a separate manual paper calibration.
+The console also reports `force_trigger_z`, `regression_z` and their signed
+difference (regression minus trigger). The `auto_z_offset.last_contact`
+status report retains those values, physical XY and measured/target
+temperatures around the tap. For a one-off manual comparison without
+staging an offset, follow the same-point procedure in
+[Automatic Z-offset](AUTO_Z_OFFSET_PLAN.md#earlier-same-point-manual-comparison).
+
+#### AUTO_Z_OFFSET_CALIBRATE
+
+`AUTO_Z_OFFSET_CALIBRATE [BED_TEMP=<degrees>] [NOZZLE_TEMP=<degrees>]`:
+Require successful supervised contact at every configured point. With
+`probe_points`, measure three fresh CR Touch/nozzle pairs at each configured
+physical points and report each local median/minimum/maximum/range. Reject
+invalid contacts, non-finite/out-of-range offsets and excessive within-point
+spread immediately, without discarding samples or retrying. Each CR Touch
+measurement retains its own configured sample parameters.
+
+With two points, the first is the reference and the second validates it.
+After both local medians are available, compare their maximum minus
+minimum against `spatial_tolerance` (at most 0.025 mm). A larger spread sets
+state `rejected`, retains both reports, and produces no candidate. Otherwise
+the candidate is the first point's median; the second point never contributes
+to an average. Configuration and the runtime offset are unchanged.
+
+Four configured points remain supported for optional spatial diagnostics,
+with three pairs per point and the same local/spatial rejection checks.
+That mode retains all four reports and uses the median of local medians
+(the midpoint of the two middle medians) only if they agree. The legacy
+`probe_point` configuration still measures five pairs at its single location
+and reports their median.
+
+Both measurement commands default to the configured calibration targets
+(50 C bed, 170 C nozzle). Targets below 50 C bed or 170 C nozzle are rejected.
+Both measured
+temperatures must reach the nominal minima at least once, then accumulate
+the configured stabilization time within the target band. Brief excursions
+pause accumulation instead of resetting it. Start measurements in band;
+normal in-band fluctuations may cross below the nominal minima.
+Recheck before and after contacts. Out-of-band readings wait up to
+`temperature_recovery_time` (default 10 seconds) for recovery, without
+reapplying targets or retrying contacts. Recovery timeout, changed heater
+targets, non-finite readings and readings outside the heater's configured
+min/max limits reject the result. Restore the
+previous heater targets on exit unless the printer has shut down. Do not
+pass probe/force overrides: the tap uses its configured limits.
+Thermal failures report the heater, measured/current-target/expected-target
+values and allowed band. On failure, a separate message identifies the
+previous targets restored during cleanup. Do not bypass a thermal failure
+by increasing tolerance to hide erratic sensor readings.
+
+#### AUTO_Z_OFFSET_ACCEPT
+
+`AUTO_Z_OFFSET_ACCEPT`: Confirm the validated in-memory candidate and stage
+`[bltouch] z_offset` with Klipper's existing configuration API. Refuse stale
+references, printing/paused jobs, or an already pending probe-offset edit.
+Unrelated pending settings are preserved. The runtime offset is unchanged.
+The user must subsequently issue `SAVE_CONFIG` to write the active printer
+configuration and restart Klipper. That command saves all pending settings.
 
 ### [load_cell_probe]
 

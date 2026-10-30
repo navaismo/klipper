@@ -145,6 +145,19 @@ class LoadCellCommandHelper:
                           % (min_pct, max_pct))
         gcmd.respond_info("Sample range / sensor capacity: %.5f%%"
                           % ((max_pct - min_pct) / 2.))
+        mean_counts = avg(counts)
+        gcmd.respond_info("Raw counts: min %i, mean %.2f, max %i"
+                          % (min(counts), mean_counts, max(counts)))
+        if self.load_cell.is_calibrated():
+            scale = self.load_cell.get_counts_per_gram()
+            reference = self.load_cell.get_reference_tare_counts()
+            reference_force = (self.load_cell.invert
+                               * (mean_counts - reference) / scale)
+            noise = (max(counts) - min(counts)) / scale
+            gcmd.respond_info(
+                "Reference mean force: %.2f g (reference tare: %i counts); "
+                "noise: %.2f g peak-to-peak"
+                % (reference_force, reference, noise))
 
 # Class to guide the user through calibrating a load cell
 class LoadCellGuidedCalibrationHelper:

@@ -121,6 +121,7 @@ nav:
   - Developer Documentation:
     - Code_Overview.md
     - LCD_STATUS_PLAN.md
+    - AUTO_Z_OFFSET_PLAN.md
     - Kinematics.md
     - Protocol.md
     - API_Server.md

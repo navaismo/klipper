@@ -8,6 +8,84 @@ All dates in this document are approximate.
 
 ## Changes
 
+20261029 (fork Auto Z-offset preparation and partial LCD): AUTO_Z_OFFSET now
+warms up, clears an active bed mesh, runs G28 and checks readiness again before
+the P1/P2 tests. Its configured bed default changes from 60 to 50 C; nozzle
+default remains 170 C. Existing explicit temperature configuration/command
+overrides remain effective. Manual TEST_CONTACT/CALIBRATE still require homing
+and an inactive mesh. A failed preparation prevents nozzle contact and saves
+nothing. The mesh is not restored; KAMP remains unchanged.
+
+The old full-card travel animation is replaced by a static calibration layout
+with partial phase highlighting. This requires mainboard firmware exposing
+TJC_CANVAS_VERSION=1; panel firmware and job payload v5 remain unchanged. Older
+firmware keeps print/idle rendering and can calibrate without the LCD screen,
+with a console warning. No full-screen blinking fallback is used.
+
+20261029 (fork Auto Z-offset workflow): New AUTO_Z_OFFSET runs the two
+supervised point tests followed by six fresh calibration pairs in one warm
+session, without accepting/saving. Existing commands remain available. With
+tjc_lcd, measurement commands show a host-prepared travel-only illustration
+through the existing v5 renderer; no MCU/panel firmware update is needed.
+Each LCD transfer drains before measurement. Error messages include the
+failed stage/point/pair; auto_z_offset.stage exposes the last step.
+
+20261029 (fork two-point Auto Z-offset): `probe_points` now accepts two
+locations with three fresh pairs each. The first point supplies the candidate
+and the second validates agreement within `spatial_tolerance` (at most
+0.025 mm); their medians are not averaged. Four-point configurations retain
+their existing behavior for optional diagnostics, and legacy `probe_point`
+is unchanged. Existing saved/runtime offsets are not modified by measurement.
+
+20261023 (fork Auto Z-offset bed minimum): The minimum bed target is now 50 C
+for both bed_temp configuration and BED_TEMP command overrides. The initial
+warm-up minimum is also 50 C, so valid 50 C targets do not wait for 60 C.
+The default bed target remains 60 C; nozzle minimum/default remains 170 C.
+Temperature tolerance/recovery and all other protections are unchanged.
+
+20261023 (fork passive load-cell diagnostics): LOAD_CELL_DIAGNOSTIC additionally
+reports raw minimum/mean/maximum counts and, when calibrated, mean force from
+the saved reference and peak-to-peak noise in grams. This reuses its existing
+ten-second collection without changing calibration, tare or probing behavior.
+
+20261023 (fork load-cell safety): Auto Z-offset captures one unloaded ADC
+reference at clearance per hot measurement point. force_safety_limit is applied
+around this reference and remains fixed for that point's three pairs (five in
+legacy mode), independently of per-contact tares. Its saved sensor reference
+and scale are unchanged. Generic load_cell_probe keeps its saved-reference
+raw band. Both paths reject insufficient compression margin before approach;
+ADC saturation/headroom checks and MCU raw protection remain active. Auto
+Z-offset logs saved/point/local references and bounded failed-approach samples.
+Diagnostic failures do not mask the original error. No force-limit increase,
+thermal-guard change, new configuration option or MCU protocol is introduced.
+
+20261023 (fork spatial Auto Z-offset): Optional `probe_points` selects four
+physical locations with three paired measurements per point. Legacy
+`probe_point` retains five pairs at one location; the options are mutually
+exclusive. Supervised `AUTO_Z_OFFSET_TEST_CONTACT POINT=n` is required at
+every configured location. Calibration reports local medians and rejects a
+global candidate when their range exceeds `spatial_tolerance` (default and
+maximum 0.025 mm), retaining the four diagnostic reports. A valid candidate
+uses the median of local medians, never an unconditional average. Existing
+saved/runtime offsets and print-start/KAMP macros are unchanged.
+
+20261023 (fork load-cell fit): The shared contact estimator now finds the
+global least-squares optimum of its existing piecewise model rather than
+using a local search that could converge to an incorrect split. Non-monotonic
+ascent positions and nonnegative release-force slopes are rejected. This
+affects Auto Z-offset and load_cell_probe; sensor orientation must represent
+nozzle compression as positive force. Auto Z-offset logs bounded force/Z
+traces and fit coordinates automatically. Existing offsets are unchanged;
+this host-only correction still requires physical qualification.
+
+20261023 (fork Auto Z-offset): Warm-up now accumulates time in the configured
+temperature band instead of requiring consecutive seconds. Actual bed/nozzle
+temperatures must reach 60/170 C at least once; later in-band fluctuations
+may cross below these nominal minima. Measurement checkpoints now wait up to
+`temperature_recovery_time` (default 10 seconds) for ordinary out-of-band
+readings to recover. Changed targets, invalid sensor temperatures and recovery
+timeouts still reject calibration. Existing force and fit checks are unchanged.
+
 20261022 (fork LCD): The job/idle layouts use payload v5 and require
 matching host extras and MCU firmware advertising `TJC_JOB_VERSION=5`.
 Previously exported v1/v2/v3/v4 binary jobs must be regenerated. Keep the

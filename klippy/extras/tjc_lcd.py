@@ -4,9 +4,9 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging
 try:
-    from . import lcd_transfer
+    from . import lcd_transfer, lcd_canvas
 except ImportError:
-    import lcd_transfer
+    import lcd_transfer, lcd_canvas
 
 JOB_ERRORS = {1: 'LCD is busy', 2: 'Invalid LCD payload/header/text',
               3: 'Unexpected LCD transfer offset',
@@ -48,6 +48,12 @@ class TJCLCD:
         self.render_completion = None
         self.render_kind = None
         self.startup_idle_pending = False
+        self.calibration_active = False
+        self.calibration_stage = None
+        self.calibration_phase = None
+        self.canvas_begin_cmd = self.canvas_rect_cmd = None
+        self.canvas_text_cmd = self.canvas_end_cmd = None
+        self.canvas_abort_cmd = None
         self.job_begin_cmd = self.job_chunk_cmd = None
         self.job_end_cmd = self.job_abort_cmd = None
         self.start_cmd = self.clear_cmd = None
@@ -75,6 +81,8 @@ class TJCLCD:
                                     desc=self.cmd_TJC_LCD_CLEAR_help)
         self.gcode.register_command('TJC_LCD_IDLE', self.cmd_TJC_LCD_IDLE,
                                     desc=self.cmd_TJC_LCD_IDLE_help)
+        self.gcode.register_command('TJC_LCD_RECT', self.cmd_TJC_LCD_RECT,
+                                    desc='Fill an LCD region by coordinates')
 
     def _build_config(self):
         if self.mcu.get_constants().get('TJC_LCD_VERSION') != 1:
@@ -89,6 +97,24 @@ class TJCLCD:
         self.start_cmd = self.mcu.lookup_command('tjc_lcd_start oid=%c', cq=cq)
         self.clear_cmd = self.mcu.lookup_command(
             'tjc_lcd_clear oid=%c color=%hu', cq=cq)
+        if self.mcu.get_constants().get('TJC_CANVAS_VERSION') == 1:
+            self.mcu.register_serial_response(
+                self._handle_canvas_result,
+                'tjc_lcd_canvas_result oid=%c token=%u index=%hu'
+                ' state=%c error=%c', self.oid)
+            self.canvas_begin_cmd = self.mcu.lookup_command(
+                'tjc_lcd_canvas_begin oid=%c token=%u clear=%c color=%hu',
+                cq=cq)
+            self.canvas_rect_cmd = self.mcu.lookup_command(
+                'tjc_lcd_canvas_rect oid=%c token=%u index=%hu'
+                ' x0=%hu y0=%hu x1=%hu y1=%hu color=%hu', cq=cq)
+            self.canvas_text_cmd = self.mcu.lookup_command(
+                'tjc_lcd_canvas_text oid=%c token=%u index=%hu'
+                ' x=%hu y=%hu font=%c color=%hu background=%hu text=%*s', cq=cq)
+            self.canvas_end_cmd = self.mcu.lookup_command(
+                'tjc_lcd_canvas_end oid=%c token=%u index=%hu', cq=cq)
+            self.canvas_abort_cmd = self.mcu.lookup_command(
+                'tjc_lcd_canvas_abort oid=%c token=%u', cq=cq)
         if (self.mcu.get_constants().get('TJC_JOB_VERSION')
             == lcd_transfer.VERSION):
             self.mcu.register_serial_response(
@@ -120,6 +146,7 @@ class TJCLCD:
         self.reactor.register_callback(initialize)
 
     def _handle_disconnect(self):
+        self.calibration_active = False
         self.startup_idle_pending = False
         self.connected = False
         self.generation += 1
@@ -136,7 +163,8 @@ class TJCLCD:
 
     def _handle_reset_file(self):
         self.idle_generation += 1
-        if self.state == 'rendering' and self.render_kind != 'idle':
+        if (self.state == 'rendering'
+            and self.render_kind not in ('idle', 'canvas')):
             self._abort_job()
             self._fail('LCD preparation invalidated by file reset')
             if self.job_completion is not None:
@@ -153,7 +181,8 @@ class TJCLCD:
             self._schedule_idle(wait_moves=True)
 
     def _handle_idle_timeout(self, print_time):
-        if not self.connected or self.state != 'ready' or self.screen == 'idle':
+        if (not self.connected or self.state != 'ready' or self.screen == 'idle'
+            or self.calibration_active):
             return
         stats = self.printer.lookup_object('print_stats', None)
         if stats is not None and stats.get_status(
@@ -167,7 +196,7 @@ class TJCLCD:
         def show_idle(eventtime):
             if (not self.connected or generation != self.generation
                 or token != self.idle_generation or self.state != 'ready'
-                or self.job_begin_cmd is None):
+                or self.job_begin_cmd is None or self.calibration_active):
                 return
             try:
                 # Let a running end/cancel macro finish queuing its moves.
@@ -276,9 +305,10 @@ class TJCLCD:
             self.job_completion = self.job_expected = None
 
     def _abort_job(self):
-        if (self.connected and not self.printer.is_shutdown()
-            and self.job_abort_cmd is not None):
-            self.job_abort_cmd.send([self.oid, self.job_token])
+        command = self.canvas_abort_cmd if self.render_kind == 'canvas' \
+            else self.job_abort_cmd
+        if self.connected and not self.printer.is_shutdown() and command:
+            command.send([self.oid, self.job_token])
 
     def render_job(self, job):
         if self.printer.get_start_args().get('debugoutput') is not None:
@@ -290,7 +320,98 @@ class TJCLCD:
         if self.printer.get_start_args().get('debugoutput') is not None:
             return
         self._handle_before_print(None)
-        self._render(lcd_transfer.prepare_idle(), 'idle')
+        version = self.mcu.get_status(self.reactor.monotonic()).get(
+            'mcu_version') or 'unknown'
+        footer = self.mcu.get_constants().get('TJC_IDLE_VERSION') == 1
+        self._render(lcd_transfer.prepare_idle(version, footer), 'idle')
+
+    def begin_calibration(self, text, nozzle_target=None, bed_target=None):
+        if (self.canvas_begin_cmd is None or
+            self.printer.get_start_args().get('debugoutput') is not None):
+            return False
+        self._handle_before_print(None)
+        self._check_idle()
+        sd = self.printer.lookup_object('virtual_sdcard', None)
+        if sd is not None and sd.preflight_pending:
+            raise self.gcode.error('LCD calibration requires no pending print')
+        self.calibration_active = True
+        self.calibration_stage = text
+        self.calibration_phase = None
+        try:
+            if nozzle_target is not None and bed_target is not None:
+                text += ' B%.0f N%.0f' % (bed_target, nozzle_target)
+            self.render_canvas(lcd_canvas.initial_view(text), clear=True)
+        except Exception:
+            self.calibration_active = False
+            raise
+        return True
+
+    def update_calibration(self, phase, text):
+        if not self.calibration_active:
+            return
+        self.render_canvas(lcd_canvas.highlight(
+            self.calibration_phase, phase, text))
+        self.calibration_phase = phase
+        self.calibration_stage = text
+
+    def end_calibration(self, text, success):
+        active = self.calibration_active
+        self.calibration_active = False
+        if not active or not self.connected or self.printer.is_shutdown():
+            return
+        if self.state != 'ready':
+            return
+        phase = self.calibration_phase or 'cr_touch'
+        self.render_canvas(lcd_canvas.highlight(phase, phase, text,
+                            'done' if success else 'error'),
+                           screen='calibration_result')
+
+    def _handle_canvas_result(self, params):
+        self._handle_job_result(dict(params, offset=params['index']))
+
+    def render_canvas(self, operations, clear=False, screen='calibration'):
+        self._check_idle()
+        if self.canvas_begin_cmd is None:
+            raise self.gcode.error('LCD partial drawing requires firmware '
+                                   'with TJC_CANVAS_VERSION=1')
+        operations = lcd_canvas.validate(operations)
+        self.job_token = (self.job_token+1) & 0xffffffff
+        self.state = 'rendering'
+        self.error = None
+        self.rendered = False
+        self.screen = self.job_filename = None
+        self.render_kind = 'canvas'
+        completion = self.render_completion = self.reactor.completion()
+        deadline = self.reactor.monotonic() + 30.
+        token = self.job_token
+        try:
+            self._job_request(self.canvas_begin_cmd,
+                [self.oid, token, int(clear), lcd_canvas.BACKGROUND],
+                0, 1, deadline)
+            for index, op in enumerate(operations, 1):
+                if self.reactor.monotonic() >= deadline:
+                    raise self.gcode.error('LCD canvas session exceeded 30s')
+                command = self.canvas_rect_cmd if op[0] == 'rect' \
+                    else self.canvas_text_cmd
+                self._job_request(command, [self.oid, token, index]
+                                  + list(op[1:]), index, 1, deadline)
+            index = len(operations)+1
+            self._job_request(self.canvas_end_cmd, [self.oid, token, index],
+                              index, 2, deadline)
+        except Exception as exc:
+            try:
+                self._abort_job()
+            except Exception:
+                logging.exception('Could not abort LCD canvas')
+            if self.connected:
+                self._fail(str(exc))
+            completion.complete(False)
+            raise self.gcode.error('LCD canvas failed: %s' % (exc,))
+        finally:
+            self.render_completion = self.render_kind = None
+        self.state = 'ready'
+        self.screen = screen
+        completion.complete(True)
 
     def _render(self, transfer, kind, filename=None):
         self._check_idle()
@@ -343,6 +464,8 @@ class TJCLCD:
 
     def _handle_before_print(self, filename):
         self.idle_generation += 1
+        if self.calibration_active:
+            raise self.gcode.error('LCD is reserved for Auto Z-offset')
         if self.printer.get_start_args().get('debugoutput') is not None:
             return
         if self.state == 'idle':
@@ -420,6 +543,20 @@ class TJCLCD:
         self.printer.lookup_object('toolhead').wait_moves()
         self.render_idle()
         gcmd.respond_info('TJC LCD idle screen rendered')
+
+    def cmd_TJC_LCD_RECT(self, gcmd):
+        self._check_idle()
+        if self.calibration_active:
+            raise gcmd.error('LCD is reserved for Auto Z-offset')
+        x0 = gcmd.get_int('X0', minval=0, maxval=239)
+        y0 = gcmd.get_int('Y0', minval=0, maxval=319)
+        x1 = gcmd.get_int('X1', minval=x0, maxval=239)
+        y1 = gcmd.get_int('Y1', minval=y0, maxval=319)
+        color = gcmd.get_int('COLOR', minval=0, maxval=65535)
+        self.printer.lookup_object('toolhead').wait_moves()
+        self.render_canvas([lcd_canvas.rect(x0, y0, x1, y1, color)],
+                           screen='custom')
+        gcmd.respond_info('TJC LCD region filled')
 
 
 def load_config(config):

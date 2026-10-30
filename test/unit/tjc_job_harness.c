@@ -69,14 +69,20 @@ uint_fast8_t tjc_lcd_send_frame(uint8_t op, const uint8_t *p, uint8_t len)
         assert(p[4] == 0 && p[5] == 0x42 && len > 11);
         assert(be16(p+9) == BACKGROUND);
         if (job.header[5] & IDLE_SCREEN) {
-            field = y == 102 ? 0 : y == 174 ? 1 : y == 207 ? 2 : 4;
-            assert(y == 102 || y == 174 || y == 207 || y == 282);
-            unsigned int cell = field == 0 ? 20 : field == 2 ? 8 : 12;
-            assert(p[6] == (field == 0 ? 6 : field == 2 ? 1 : 3));
-            assert(x == (field == 2 ? 12 : (240-expected_sizes[field]*cell)/2)
+            unsigned int footer=expected_sizes[3] > 2;
+            field = y == 102 ? 0 : y == 174 ? 1
+                : y == 207 ? 2 : y == 304 ? 3 : 4;
+            assert(y == 102 || y == 174 || y == 207
+                   || y == (footer ? 276 : 282) || (footer && y == 304));
+            unsigned int cell = field == 0 ? 20 : field == 3 ? 8
+                : field == 2 ? 8 : 12;
+            assert(p[6] == (field == 0 ? 6 : field == 3 ? 1
+                            : field == 2 ? 1 : 3));
+            assert(x == (field == 2 ? 12
+                         : (240-expected_sizes[field]*cell)/2)
                    + text_pos[field]*cell);
             unsigned int c = field == 0 && !text_pos[field] ? RED
-                           : field == 2 || field == 4 ? 0x8d7b : 0xffff;
+                : field == 2 || field == 3 || field == 4 ? 0x8d7b : 0xffff;
             assert(be16(p+7) == c);
         } else if (y == 296) {
             field = x < 120 ? 7 : 8;
@@ -115,7 +121,9 @@ uint_fast8_t tjc_lcd_send_frame(uint8_t op, const uint8_t *p, uint8_t len)
             for (unsigned int x=x0; x<=x1; x++) panel[y][x]=color;
         if ((job.phase == J_FLUSH || job.phase == J_RECT)) {
             assert(x0 >= THUMB_X && x1 < THUMB_X+96);
-            assert(y0 >= THUMB_Y && y1 < THUMB_Y+96 && color);
+            assert(y0 >= THUMB_Y && y1 < THUMB_Y+96);
+            // Raw-image runs skip black; rectangle payloads may erase with it.
+            assert(job.phase == J_RECT || color);
             fills++;
         }
     } else
@@ -219,9 +227,10 @@ int main(int argc, char **argv)
     }
     assert(last_state == RESULT_RENDERED && !last_error && fence == 1);
     if (data[5] == IDLE_SCREEN) {
-        assert(texts == 5);
+        assert(texts == (expected_sizes[3] > 2 ? 6 : 5));
         for (unsigned int i=0; i<9; i++)
-            assert(text_pos[i] == (i < 3 || i == 4 ? expected_sizes[i] : 0));
+            assert(text_pos[i] == (i < 3 || i == 4
+                || (i == 3 && expected_sizes[3] > 2) ? expected_sizes[i] : 0));
         assert(panel[38][72] == RED && panel[90][110] == RED);
         assert(panel[148][14] == BORDER && panel[148][120] == CYAN);
         assert(panel[159][0] == BACKGROUND);

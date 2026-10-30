@@ -11,6 +11,7 @@
 #include "tjc_uart.h"
 
 DECL_CONSTANT("TJC_JOB_VERSION", 5);
+DECL_CONSTANT("TJC_IDLE_VERSION", 1);
 
 enum { HEADER_SIZE=34, FIELD_COUNT=9, TEXT_SIZE=188, MAX_JOB_SIZE=18655,
        BACKGROUND=0x0863, BORDER=0x3290, FOREGROUND=0xdeff,
@@ -280,7 +281,8 @@ validate_header(void)
     uint16_t text_size = 0;
     for (uint_fast8_t i=0; i<FIELD_COUNT; i++) {
         uint16_t len = be16(h + 12 + i*2);
-        uint8_t limit = (h[5] & IDLE_SCREEN) && i == 2 ? 27 : text_limits[i];
+        uint8_t limit = (h[5] & IDLE_SCREEN) && (i == 2 || i == 3)
+            ? 27 : text_limits[i];
         if (!len || len > limit)
             return 0;
         if ((h[5] & IDLE_SCREEN)
@@ -399,6 +401,7 @@ draw_idle_text(void)
     for (uint_fast8_t i=0; i<job.field; i++)
         base += job.lengths[i];
     uint8_t len = job.lengths[job.field] - job.field_pos;
+    uint8_t version_footer = job.lengths[3] > 2;
     uint8_t font = 1;
     uint16_t x, y, color = 0xffff;
     if (job.field == 0) {
@@ -414,13 +417,19 @@ draw_idle_text(void)
         x = (240-len*12)/2;
         y = 174;
     } else if (job.field == 2) {
+        // Keep the repository URL in its original position and font.
         x = 12;
         y = 207;
+        color = 0x8d7b;
+    } else if (job.field == 3) {
+        // Use the panel-verified 8x16 font; font 0 is wider than assumed.
+        x = (240-len*8)/2;
+        y = 304;
         color = 0x8d7b;
     } else {
         font = 3;
         x = (240-len*12)/2;
-        y = 282;
+        y = version_footer ? 276 : 282;
         color = 0x8d7b;
     }
     uint8_t data[47] = {0, 0, 0, 0, 0, 0x42, font, 0, 0,
@@ -432,10 +441,10 @@ draw_idle_text(void)
     if (!frame(0x98, data, 11+len))
         return;
     job.field_pos += len;
-    // Only slots 0,1,2,4 belong to the idle layout.
+    // Slot 3 is the firmware identity; older hosts leave it as "--".
     if (job.field_pos == job.lengths[job.field]) {
         job.field_pos = 0;
-        if (++job.field == 3)
+        if (++job.field == 3 && !version_footer)
             job.field = 4;
         if (job.field == 5)
             job.phase = J_WAIT_END;
