@@ -5563,8 +5563,138 @@ data_ready_pin:
 #   The default is 16.
 ```
 
+### [auto_z_offset]
+
+Fork-specific, user-invoked calibration of `[bltouch] z_offset` using one
+existing named `[load_cell]`. Keep CR Touch as the primary `probe`; do not
+also configure `[load_cell_probe]`. The sensor backend and MCU analog-trigger
+support must be available in the installed firmware. No new C protocol is
+introduced. See [staged setup](AUTO_Z_OFFSET_PLAN.md) before enabling contacts.
+With two `probe_points`, AUTO_Z_OFFSET runs both supervised tests followed by
+calibration in one warm session. Separate test/calibration commands remain
+available. AUTO_Z_OFFSET includes full homing and mesh clear; the separate
+manual commands still require those preparation steps. Optional `[tjc_lcd]`
+uses a coordinate canvas to highlight each phase without full-screen redraws.
+It requires updated mainboard firmware with TJC_CANVAS_VERSION=1, but no panel
+firmware update. Drawing drains before measurement.
+
+```ini
+[auto_z_offset]
+load_cell:
+#   Name from [load_cell name]. Reuses that sensor and its calibration.
+#probe_point:
+#   Legacy single physical bed XY point, measured with five pairs.
+#probe_points:
+#   Two distinct physical bed XY points, one pair of coordinates
+#   per line. Each is measured with three fresh CR Touch/nozzle pairs.
+#   The first point supplies the candidate; the second only validates it.
+#   Recommended Ender-3 V3 SE points: (28,28), then (110,110).
+#   Specify either probe_point or probe_points, never both. No default.
+#   Four distinct points remain supported for optional spatial diagnostics;
+#   that mode retains its median-of-local-medians candidate policy.
+speed:
+lift_speed:
+#   Explicit nozzle approach and contact-release speeds in mm/s. Required.
+#   Qualify both at the actual sensor sample rate. Auto Z-offset analyzes up
+#   to 5 seconds of the acquired ascent and still requires at least three
+#   samples on each side of contact. The regular load-cell probe retains
+#   its 0.3-second default window.
+trigger_force:
+force_safety_limit:
+#   Required, locally validated force values in grams. Existing limits apply:
+#   trigger_force 10..250, force_safety_limit 100..10000 and greater than
+#   trigger_force. These are allowed configuration ranges, not safe hardware
+#   recommendations. Never guess counts_per_gram in the load_cell section.
+#   Auto Z-offset captures an unloaded point reference at clearance with
+#   the existing ADC averaging API, once per point. The raw safety band
+#   is centered on this fixed reference for all pairs at that point.
+#   Each trigger uses its own local tare; later tares do not move the raw
+#   band. Compression headroom must exceed trigger_force. Saved sensor
+#   calibration and reference_tare_counts are unchanged. Generic
+#   load_cell_probe retains its saved-reference safety behavior.
+#horizontal_move_z: 5
+#   Travel clearance in mm; must exceed the current probe Z offset.
+#travel_speed: 50
+#z_hop_speed: 5
+#   XY travel and Z clearance speeds in mm/s. Contact uses speed/lift_speed.
+#bed_temp: 50
+#nozzle_temp: 170
+#   Calibration targets in C; cannot be below 50/170 or exceed heater limits.
+#temperature_tolerance: 2
+#   Target band in C. Both measured temperatures must first reach their
+#   nominal minima (50/170 C) at least once. Afterwards normal fluctuations
+#   within this band are allowed, including below those nominal minima.
+#temperature_stable_time: 5
+#   Accumulated seconds in band before starting contact. Brief excursions
+#   pause accumulation instead of resetting it. Contact starts in band.
+#temperature_recovery_time: 10
+#   Maximum wait in seconds for recovery after an out-of-band reading at a
+#   measurement checkpoint. Does not reset targets or repeat contacts.
+#heating_timeout: 600
+#   Maximum wait in seconds; must exceed temperature_stable_time.
+#offset_tolerance: 0.025
+#   Maximum spread in mm among paired offsets at each individual point.
+#spatial_tolerance: 0.025
+#   Maximum range in mm among local medians. Must be positive
+#   and no greater than 0.025. Exceeding it retains the diagnostic report
+#   but rejects a global candidate. Do not widen it to hide location bias.
+#minimum_offset: 0
+#maximum_offset: 5
+#   Inclusive physical bounds for each positive Klipper probe Z offset.
+```
+
+Every point must be on the usable bed surface and qualified with supervised
+contact at that location. Configured XY travel alone does not establish
+contact suitability or equivalent force sensitivity away from the cell.
+The nozzle position for CR Touch probing is `point - probe XY offsets`.
+For physical X28/Y28 and offsets -24/-14.5, this is nozzle X52/Y42.5.
+Both nozzle and probe positions for all configured points are checked before
+heating or motion. The Marlin reference excludes (180,180), with a warning
+about distance from the sensor. Its other points are references, not evidence
+of mechanically safe load transfer on this installation.
+
+Requires an idle, unpaused printer. AUTO_Z_OFFSET heats, clears the active
+mesh and homes XYZ automatically. Manual TEST_CONTACT/CALIBRATE require
+homed XYZ and an inactive mesh (`BED_MESH_CLEAR`). The MVP rejects configured
+axis-twist, skew and thermal-Z
+compensation modules rather than combining coordinate corrections. Existing
+print-start/KAMP configuration is unchanged. Measurement commands restore
+heater targets and leave the old probe offset active; only acceptance stages
+a save. A thermal error identifies the heater, measured temperature, current
+target and expected target; it does not reapply a changed target or widen
+the allowed temperature band. Ordinary excursions wait for bounded recovery;
+changed targets, non-finite readings and temperatures outside the heater's
+configured min/max limits fail immediately. Recovery timeout rejects the
+candidate. Restoration to a previous zero target after
+an error is cleanup, not evidence that a move turned the heater off.
+No packages are installed at runtime. The shared contact engine no
+longer requires NumPy; configured optional filter designs may require SciPy.
+The shared estimator minimizes the same loaded-line/unloaded-baseline model
+over all possible split intervals. It rejects non-monotonic ascent positions,
+nonnegative force slopes and insufficient support on either side of contact.
+Auto Z-offset automatically logs bounded force/Z traces, sample times, raw
+trigger Z, fitted contact Z and the paired coordinate calculation. Normal
+load-cell probing does not enable these detailed traces. No paper-test input
+or numeric correction towards a previously saved offset is required.
+Auto Z-offset also logs saved reference, fixed point safety reference, local
+tare, raw safety bounds, compression margin and bounded raw samples available
+after a failed approach. Its point reference is captured after warm-up,
+CR Touch measurement and a drained move to nozzle clearance. It is fixed for
+the point's three pairs (five in legacy single-point mode) and discarded on
+exit. Invalid/saturated acquisition or insufficient ADC headroom rejects the
+point before a nozzle approach. The raw guard stays active independently of
+the filtered trigger and contact estimator.
+RAW_RANGE means a raw sample crossed the configured band before filtering;
+it does not identify saturation or excessive actual nozzle force by itself.
+Do not increase force limits to hide a failed contact. A fixed point reference
+prevents cumulative re-taring within the point from moving its safety bound;
+it does not certify equivalent physical force sensitivity over the bed.
+
 ### [load_cell_probe]
 Load Cell Probe. This combines the functionality of a [probe] and a [load_cell].
+The release estimator uses a global least-squares solution of the shared
+piecewise contact model. Configure sensor orientation so nozzle compression
+is positive force; force must decrease with increasing Z during release.
 
 ```
 [load_cell_probe]

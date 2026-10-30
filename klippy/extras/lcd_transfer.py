@@ -3,7 +3,7 @@
 # Copyright (C) 2026 navaismo
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import math, posixpath, struct, zlib
+import math, posixpath, re, struct, zlib
 
 VERSION = 5
 CHUNK_SIZE = 40
@@ -191,12 +191,31 @@ def _pack(flags, encoded, width=0, height=0, raw=b''):
             'data': data}
 
 
-def prepare_idle():
+def _firmware_line(version, compact=False):
+    # Preserve revision/build identity within the selected idle text slot.
+    # Read no files here: version comes from the connected MCU identification.
+    revision = re.search(r'(?:^|-)g?([0-9a-fA-F]{7,40})(?:-|$)', version)
+    stamp = re.search(r'(?:^|-)([0-9]{8}_[0-9]{6})(?:-|$)', version)
+    if revision and stamp:
+        if compact:
+            # Older v5 firmware has only a 20-cell printer-name slot free.
+            return '%s %s' % (revision.group(1)[:8], stamp.group(1)[4:])
+        return 'FW %s %s' % (revision.group(1)[:8], stamp.group(1))
+    return 'FW: ' + version
+
+
+def prepare_idle(mcu_version=None, version_footer=False):
     # Same bounded transport; the MCU draws the logo and chooses idle layout.
     # Unused slots stay nonempty to retain the receiver's text validation.
-    texts = ('Klipper', 'Ender 3 V3 SE', 'github.com/navaismo/klipper',
-             '--', 'Idle', '--', '--', '--', '--')
-    limits = (12, 20, 27, 2, 20, 2, 2, 2, 2)
+    model, firmware = 'Ender 3 V3 SE', '--'
+    if mcu_version is not None:
+        if version_footer:
+            firmware = _firmware_line(mcu_version)
+        else:
+            model = _firmware_line(mcu_version, compact=True)
+    texts = ('Klipper', model, 'github.com/navaismo/klipper',
+             firmware, 'Idle', '--', '--', '--', '--')
+    limits = (12, 20, 27, 27, 20, 2, 2, 2, 2)
     encoded = [_text_bytes(text, limit)
                for text, limit in zip(texts, limits)]
     return _pack(IDLE_SCREEN, encoded)

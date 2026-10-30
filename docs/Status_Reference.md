@@ -164,13 +164,17 @@ The fork-specific [tjc_lcd](Config_Reference.md#tjc_lcd) object provides:
   and its trailing handshake/settling checkpoint. False after startup,
   clear, a new render, or disconnect. This is not a pixel-level panel ACK.
 - `job_filename`: Filename of that successfully rendered job, otherwise null.
-- `screen`: `blank`, `job`, `idle`, or null while rendering, on error or
-  disconnected. `rendered` is specific to a job card; an idle screen sets
+- `screen`: `blank`, `job`, `idle`, `calibration`, `calibration_result`,
+  `custom`, or null while rendering, on error or disconnected. `rendered` is specific
+  to a job card; an idle/calibration screen sets
   `rendered` to False and `job_filename` to null.
 
 Status reads do not issue MCU commands or LCD traffic. A disconnect or
 shutdown sets `disconnected`. Starting a print waits for a pending LCD
 operation and requires `ready`; pause/resume does not repeat initialization.
+The idle screen's firmware line comes from the configured display MCU's
+existing `mcu_version` status field. It does not report the local checkout or
+out/klipper.dict version and does not query/refresh periodically.
 
 ## endstop_phase
 
@@ -413,6 +417,49 @@ The following information is available for each `[load_cell name]`:
 - `overflows`: The number of data buffer overflows detected since the last
   start of measurements.
 - `sample_rate`: The sensor's sample rate in samples per second.
+
+## auto_z_offset
+
+The following information is available for `[auto_z_offset]`:
+
+- `state`: `disconnected`, `idle`, `heating`, `measuring`, `contact_ready`,
+  `candidate`, `rejected`, `accepted`, or `error`.
+- `contact_verified`: Whether supervised contact is qualified at every point.
+- `stage`: Current/last step, such as `preflight`, `warm-up`, `mesh clear`,
+  `homing`, `Test P1 pair 1`,
+  `Calibrate P2 pair 3`, `spatial validation`, or `complete`. Failures retain
+  the failed step and include it in `error` and the command error message.
+- `verified_points`: Sorted one-based indices of qualified configured points.
+- `candidate`: Whether an unaccepted validated result is available.
+- `result`: Null or an object with flattened paired `offsets`, global
+  `minimum`, `maximum`, and `range`, in mm. `points` contains one report per
+  location: `point_index`, physical XY `point`, local `offsets`, `median`,
+  `minimum`, `maximum`, `range`, and diagnostic `contacts`. Each contact has
+  the same fields as `last_contact`. Two-point and optional four-point modes
+  have three pairs per location; legacy single-point mode has five.
+  `spatial_range` is the range of local medians. `valid` indicates spatial
+  agreement. With two points, `z_offset` is the first point's median if valid;
+  the second only validates agreement. Four-point mode uses the median of
+  local medians; single-point mode uses its local median. An invalid result
+  has null `z_offset`. A spatially rejected run
+  retains this report without a candidate. Acceptance retains the report but
+  consumes the candidate; it does not change the active probe offset.
+- `error`: The last measurement/cleanup error, or null.
+- `last_contact`: Null or the most recent successful pair's diagnostic report.
+  Contains one-based `point_index` and `sample_index`, `point` (physical bed
+  XY), `cr_trigger_z`, `force_trigger_z`,
+  `regression_z`, `regression_delta` (regression minus force-trigger Z),
+  `offset`, `saved_offset`, and `mesh_active` (False for these measurements).
+  All positions/distances are in mm in the toolhead frame. Also contains
+  `temperatures_before` and `temperatures_after`: each has `bed` and `nozzle`
+  objects with `measured` and `target` in C, sampled around the nozzle tap.
+  This report is available after TEST_CONTACT without staging an offset.
+
+Homing, load-cell recalibration, disconnect and shutdown invalidate the result.
+They also clear `last_contact`; a new run or failed measurement clears it.
+Configuration changes to the probe or force calibration also prevent accepting
+a stale candidate. Nothing is persisted until explicit acceptance and the
+subsequent standard `SAVE_CONFIG` operation.
 
 ## load_cell_probe
 

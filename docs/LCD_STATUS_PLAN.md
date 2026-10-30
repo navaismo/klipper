@@ -3,6 +3,112 @@
 ## Objective
 Reuse the printer's original LCD **without physically disconnecting it** while Klipper runs. It is a **read-only, static** display. No touch, menus, or printer control in v1.
 
+## Reported MCU firmware on idle (2026-10-29)
+
+The idle screen retains the complete repository URL and shows the firmware
+identity reported by the MCU driving the display. The host reads that MCU's
+public get_status().mcu_version, populated during serial identification;
+it never substitutes the checkout version, out/klipper.dict or the binary
+being prepared for flashing. No canvas/coordinate diagnostics are shown.
+
+With mainboard firmware advertising TJC_IDLE_VERSION=1, the original logo and
+printer name remain unchanged. The reported build appears centered at y304
+in the panel-verified font 1 (8x16), e.g. `FW 43fc76cb 20261029_211120`, fitting
+within y319. The complete URL retains its original x12/y207 and font 1 (8x16).
+Idle moves up six pixels to y276 when the footer is present so its 12x24 text
+does not overlap the firmware line. Legacy idle payloads keep Idle at y282.
+Slot 3 of the existing v5 idle text payload carries up to 27 bytes of firmware
+identity. The C renderer draws it only when that slot is not the legacy `--`.
+Original v5 job cards and idle payloads from older hosts remain supported.
+
+An older MCU without that footer capability cannot reposition its fixed
+text slots. The host therefore preserves the URL at y207 and uses the
+20-cell model line for `<revision> <MMDD_HHMMSS>`, e.g.
+`43fc76cb 1029_211120`. This keeps revision/build identity visible without
+reflashing, rather than removing the URL. The displayed year is omitted only
+in this compact compatibility mode. Unrecognized versions use a bounded
+`FW: <reported version>` fallback; missing identity shows `FW: unknown`.
+The full identification string remains available through MCU status.
+
+Adding or correcting the firmware footer requires rebuilding mainboard firmware
+with the existing LCD option; panel firmware is unchanged. Until that flash
+succeeds, updating/restarting the host while idle still gives the compatible
+version-plus-URL layout. TJC_LCD_IDLE redraws manually while idle; startup and
+completion/cancellation use the existing one-shot lifecycle. No polling or
+LCD traffic is added during printing. The owner reported firmware identity
+43fc76cb with build timestamp 20261029_213642 on the physical LCD after flashing.
+That build had the URL and firmware positions swapped. The corrected layout
+restores the URL and moves the firmware line to the bottom. The owner later
+confirmed LCD operation with the new build and supplied Screenshots/Zoffset.jpg,
+which shows the footer shifted right and clipped. The assumed 6-pixel width
+of font 0 is not valid on this panel. The corrected source explicitly uses
+font 1 and centers its 27-byte label within 216 pixels (x12), retaining the
+full build timestamp. The owner's 2026-10-30 photo
+[idle with firmware](../Screenshots/idle_w_fw.jpg) shows the complete footer
+centered below Idle, confirming the corrected layout on the physical panel.
+
+## Idle Z-offset phase highlights (2026-10-29)
+
+The earlier full-card travel animation visibly flickered. The owner supplied
+an Auto Z-Offset Calibration design with three rows and requested partial
+highlighting instead: CR Touch Reference, Nozzle Contact, Computing Offset.
+After reviewing the limitation of v5, the owner explicitly authorized a
+mainboard firmware extension and chose host-supplied drawing coordinates.
+This supersedes the earlier no-firmware/travel-animation plan. Panel firmware
+and static print/idle behavior remain unchanged.
+
+`lcd_canvas.py` approximates the artwork using semantic rectangle/text
+operations. `tjc_canvas.c` exposes TJC_CANVAS_VERSION=1 and validates logical
+240x320 bounds, fonts 1/3, GBK, token/sequence and session limits. The MCU
+retains frame construction and USART2 ownership; host Python never opens
+an LCD serial port or submits raw serial frames. A filled rectangle erases
+only its specified region. The initial view clears once; phase transitions
+repaint only previous/current row bounds and the small status strip.
+
+AUTO_Z_OFFSET warms to default 50/170 C, clears the active mesh, homes XYZ,
+tests P1/P2 and then takes six fresh pairs. Existing explicit configuration
+or command temperatures override the defaults. The separate manual commands
+retain homing/mesh prerequisites. All three commands share phase highlighting.
+Complete each update and its final handshake/50 ms settling before sampling;
+UART and canvas timer stop afterwards. No periodic animation or screen
+updates run during CR Touch, ADC baseline/tare, force contact or contact fit.
+Computing Offset highlights final result validation. Errors retain detailed
+console/log messages and show a bounded static failure view.
+
+Canvas sessions use <=511 drawing operations, one pending operation at a
+time, at most one LCD frame per task, 16 ms pacing per ten frames, five-second
+MCU inactivity timeout and a 30-second host deadline. Printing/paused states
+reject drawing, and a calibration reserves the LCD against idle callbacks or
+new print preparation. Original v5 cards/thumbnails are unchanged. New
+mainboard firmware is required once, under the existing CONFIG_TJC_LCD flag;
+no panel firmware update or Pillow dependency is introduced. An old MCU
+without the capability gives a console warning and no blinking fallback.
+
+The owner has since confirmed a complete Auto Z-offset cycle with the LCD
+active and supplied physical warm-up/CR Touch/nozzle-contact photos for the
+README. This confirms phase-screen operation, not print-quality measurements.
+No printer operations have been performed by the agent.
+
+### Canvas session clock initialization fix (2026-10-29)
+
+The owner reported AUTO_Z_OFFSET stopping at Test P1 pair 1 with
+`LCD canvas failed: No LCD job acknowledgement from MCU` after warm-up.
+Native replay found that canvas begin zeroed next_frame without setting it
+to the current MCU clock. Signed rollover-safe comparison can treat zero as
+a future time during half of the 32-bit clock cycle. Both the initial view
+and a partial phase update could then stall until the host's three-second
+ACK deadline, before the MCU's five-second inactivity error.
+
+Canvas begin now initializes next_frame from timer_read_time(), as the job
+renderer already does. Native tests reproduce both failures before the fix
+and require prompt begin acknowledgements after a simulated warm-up gap;
+existing rollover, UART, fence and timeout checks remain active. This is a
+mainboard C correction requiring rebuild/flash under the existing LCD option;
+no timeout increase, sensor algorithm or panel firmware change is involved.
+The owner subsequently confirmed a full two-point cycle with LCD updates
+and no ACK errors after deploying the fix. No hardware actions were executed
+by the agent.
+
 ## Agreed architecture and physical connection
 - **Owner-confirmed connection:** the LCD is connected by USART to the printer mainboard. It is not connected to the Raspberry Pi and is not a host serial device.
 - **Mainboard C driver:** own USART2 initialization, TX/RX, handshake, LCD packet framing, clear, text, drawing primitives, and execution of the render. Adapt the existing Marlin C++ routines into Klipper MCU C code.
@@ -224,7 +330,7 @@ No production files/services or printer hardware were changed by this work.
 - LCD: TJC3224T1, 3.2-inch, 320x240, connected to the mainboard USART as confirmed by the owner. The previous Marlin driver uses logical coordinates 240x320. Use that known implementation and its UART mapping as the reference; check compatibility with production Klipper's peripheral allocation before implementation. Do not substitute a generic Nextion, DWIN, or standard Klipper character LCD driver.
 - Host: Raspberry Pi 3B+ (about 1 GB RAM), Debian 13 aarch64, Klipper + Moonraker + Fluidd + Crowsnest.
 - Owner clarified that the Raspberry Pi connects by USB-C with serial transport. The connector alone does not identify the MCU host peripheral or a USB-to-UART bridge. Check the actual firmware configuration; USART2 remains assigned to the LCD.
-- Development copy: `/home/shaka/klipper-dev`, mounted in Fedora VS Code using SSHFS; stable production Klipper: `/home/shaka/klipper`.
+- The development checkout is accessed from Fedora VS Code over SSHFS and is separate from the stable production checkout.
 - Slicer: OrcaSlicer. Filament/file metadata and G-code headers need inspection before assuming fields are provided.
 
 ## Previous related implementation in customized Marlin
@@ -237,7 +343,7 @@ The owner developed LCD customizations in a Marlin 2.1.x fork for this printer. 
 - Layer-change comments / thumbnail metadata in prior tooling
 - Additional customized LCD menus and mesh visualizer.
 
-Primary local source root: `/home/shaka/Projects/Marlin/Marlin_bugfix_2.1_E3V3SE/`.
+Source paths below are relative to the customized Marlin reference checkout.
 Remote reference: https://github.com/navaismo/Marlin_bugfix_2.1_E3V3SE/tree/c13_sd
 
 ### Source analysis and dependencies (2026-10-21)

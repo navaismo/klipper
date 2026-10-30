@@ -66,6 +66,8 @@ communication with the Klipper developers.
   first.
 - [LCD status project](LCD_STATUS_PLAN.md): Fork-specific static LCD
   architecture and host data preparation for the Ender-3 V3 SE.
+- [Automatic Z-offset project](AUTO_Z_OFFSET_PLAN.md): Standalone load-cell
+  calibration of CR Touch offset, staged setup and measurement validation.
 - [Kinematics](Kinematics.md): Technical details on how Klipper
   implements motion.
 - [Protocol](Protocol.md): Information on the low-level messaging

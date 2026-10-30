@@ -1,0 +1,10 @@
+# Secondary load-cell engine must preserve the primary BLTouch probe.
+CONFIG auto_z_offset.cfg
+DICTIONARY atmega2560.dict
+
+G28
+G1 Z5 F300
+BLTOUCH_DEBUG COMMAND=reset
+PROBE
+QUERY_PROBE
+G1 Z5

@@ -23,6 +23,7 @@ class MCU:
         self.register_config_callback = mock.Mock()
         self.register_serial_response = mock.Mock()
         self.get_constants = mock.Mock(return_value={'TJC_LCD_VERSION': 1})
+        self.get_status = mock.Mock(return_value={})
         self.add_config_cmd = mock.Mock()
         self.seconds_to_clock = lambda seconds: int(seconds * 72000000)
         self.alloc_command_queue = mock.Mock(return_value=object())

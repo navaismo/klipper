@@ -38,7 +38,10 @@ class JobHostTests(unittest.TestCase):
         self.module.connected = True
         self.module.state = 'ready'
         self.sent = []
-        self.begin.send.side_effect = lambda a: self.ack(0, 1)
+        def begin(args):
+            self.sent = []
+            self.ack(0, 1)
+        self.begin.send.side_effect = begin
         def chunk(args):
             self.sent.append((args[2], args[3]))
             self.ack(args[2]+len(args[3]), 1)
@@ -164,8 +167,52 @@ class JobHostTests(unittest.TestCase):
         self.assertFalse(self.module.rendered)
         self.assertIsNone(self.module.job_filename)
         self.assertEqual(b''.join(data for off, data in self.sent),
-                         lcd_transfer.prepare_idle()['data'])
+                         lcd_transfer.prepare_idle('unknown')['data'])
         self.reactor.register_callback.assert_called_once()
+
+    def test_idle_reports_connected_mcu_version_without_canvas_support(self):
+        version = 'ee2c6fb6-dirty-20261023_054730-IrohKlipper'
+        self.mcu.get_status.return_value = {'mcu_version': version}
+        self.assertIsNone(self.module.canvas_begin_cmd)
+        self.module.render_idle()
+        data = b''.join(data for offset, data in self.sent)
+        self.assertEqual(data, lcd_transfer.prepare_idle(version)['data'])
+        self.assertIn(b'ee2c6fb6 1023_054730', data)
+        self.assertNotIn(b'CANVAS', data)
+        self.assertIn(b'github.com/navaismo/klipper', data)
+        self.assertIn(b'Idle', data)
+
+    def test_same_revision_different_mcu_builds_have_distinct_idle_labels(self):
+        self.mcu.get_constants.return_value['TJC_IDLE_VERSION'] = 1
+        labels = []
+        for stamp in ('20261029_211120', '20261029_223000'):
+            self.mcu.get_status.return_value = {
+                'mcu_version': '43fc76cb-dirty-' + stamp + '-IrohKlipper'}
+            self.module.render_idle()
+            data = b''.join(data for offset, data in self.sent)
+            fields = lcd_transfer.HEADER.unpack(data[:34])
+            start = 34+sum(fields[6:9])
+            label = data[start:start+fields[9]]
+            self.assertEqual(label, ('FW 43fc76cb ' + stamp).encode('ascii'))
+            self.assertLessEqual(len(label), 27)
+            labels.append(label)
+        self.assertNotEqual(*labels)
+
+    def test_idle_footer_preserves_url_model_and_full_firmware_identity(self):
+        self.mcu.get_constants.return_value['TJC_IDLE_VERSION'] = 1
+        self.mcu.get_status.return_value = {
+            'mcu_version': '43fc76cb-dirty-20261029_211120-IrohKlipper'}
+        self.module.render_idle()
+        data = b''.join(data for offset, data in self.sent)
+        for text in (b'FW 43fc76cb 20261029_211120',
+                     b'github.com/navaismo/klipper', b'Ender 3 V3 SE', b'Idle'):
+            self.assertIn(text, data)
+
+    def test_missing_mcu_version_shows_unknown_without_local_fallback(self):
+        self.mcu.get_status.return_value = {}
+        self.module.render_idle()
+        data = b''.join(data for offset, data in self.sent)
+        self.assertIn(b'FW: unknown', data)
 
     def test_finished_print_waits_for_motion_before_idle_uart(self):
         events = []
@@ -338,7 +385,8 @@ class NativeJobTests(unittest.TestCase):
             raise RuntimeError(result.stderr)
 
     def run_job(self, raw, scenario, material=None, filename=None, damage=None,
-                idle=False, trace=False, targets=None):
+                idle=False, trace=False, targets=None, idle_version=None,
+                idle_footer=False):
         path = os.path.join(self.tmp.name, 'job.bin')
         job = prepared(raw, material)
         if filename is not None:
@@ -347,7 +395,8 @@ class NativeJobTests(unittest.TestCase):
         if targets is not None:
             job.update(targets)
             lcd_status.finalize_job(job)
-        transfer = lcd_transfer.prepare_idle() if idle else job['transfer']
+        transfer = lcd_transfer.prepare_idle(idle_version, idle_footer) \
+            if idle else job['transfer']
         data = bytearray(transfer['data'])
         if damage is not None:
             offset, value = damage
@@ -455,8 +504,37 @@ class NativeJobTests(unittest.TestCase):
             with self.subTest(scenario=scenario):
                 self.run_job(None, scenario, idle=True)
 
+    def test_idle_firmware_identity_fits_original_v5_text_slot(self):
+        for version in ('43fc76cb-dirty-20261029_211120-IrohKlipper',
+                        'v0.13.0-440-g43fc76cb-20261029_211120-host',
+                        'unknown'):
+            with self.subTest(version=version):
+                self.run_job(None, 'idle', idle=True, idle_version=version)
+
     def test_idle_text_too_wide_is_rejected_before_drawing(self):
         self.run_job(None, 'invalid', idle=True, damage=(13, 13))
+
+    def test_idle_keeps_url_and_centers_firmware_using_verified_8x16_font(self):
+        frames = self.run_job(None, 'idle', idle=True, trace=True,
+            idle_version='43fc76cb-dirty-20261029_211120-IrohKlipper',
+            idle_footer=True)
+        text_frames = [f for f in frames if f[0] == 0x98]
+        url = next(f for f in text_frames
+                   if b'github.com/navaismo/klipper' in f)
+        self.assertEqual(int.from_bytes(url[1:3], 'big'), 12)
+        self.assertEqual(int.from_bytes(url[3:5], 'big'), 207)
+        self.assertEqual(url[7], 1)
+        firmware = next(f for f in text_frames if b'FW 43fc76cb' in f)
+        self.assertEqual(int.from_bytes(firmware[1:3], 'big'), 12)
+        self.assertEqual(int.from_bytes(firmware[3:5], 'big'), 304)
+        self.assertEqual(firmware[7], 1)
+        width = len(firmware[12:]) * 8
+        x = int.from_bytes(firmware[1:3], 'big')
+        self.assertEqual(x + width // 2, 120)
+        self.assertLessEqual(x + width, 240)
+        idle = next(f for f in text_frames if f[12:] == b'Idle')
+        self.assertEqual(int.from_bytes(idle[3:5], 'big'), 276)
+        self.assertLessEqual(int.from_bytes(idle[3:5], 'big') + 24, 304)
 
 
 if __name__ == '__main__':
