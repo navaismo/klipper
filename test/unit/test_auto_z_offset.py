@@ -1351,8 +1351,9 @@ class EngineTests(unittest.TestCase):
         with self.assertLogs(level='INFO') as logs:
             with self.assertRaisesRegex(RuntimeError, 'RAW_RANGE'):
                 move.probing_move(Gcmd())
-        report = lcprobe.json.loads(
-            logs.output[0].split('Load cell probe failure: ')[1])
+        entry = next(line for line in logs.output
+                     if 'Load cell probe failure: ' in line)
+        report = lcprobe.json.loads(entry.split('Load cell probe failure: ')[1])
         self.assertEqual(report['observed_raw_min'], -23000)
         self.assertEqual(report['observed_raw_max'], 6999)
         self.assertEqual(report['sample_count'], 6000)
@@ -1365,7 +1366,7 @@ class EngineTests(unittest.TestCase):
         move, collector = self.failed_diagnostic_move()
         collector.stop_collecting.return_value = ([], 0)
         move._log_probe_failure = mock.Mock(side_effect=RuntimeError('log'))
-        with self.assertLogs(level='ERROR'):
+        with self.assertLogs(level='WARNING'):
             with self.assertRaisesRegex(RuntimeError, 'RAW_RANGE'):
                 move.probing_move(Gcmd())
         collector.stop_collecting.assert_called_once()

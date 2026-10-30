@@ -13,6 +13,7 @@ from . import ads1220
 from . import cs1237
 from . import ads131m0x
 from . import probe, manual_probe, trigger_analog, load_cell
+from . import load_cell_diagnostics
 
 # MCU SOS filter scaled to "fractional grams" for consistent sensor precision
 FRAC_GRAMS_CONV = 32768.0
@@ -324,6 +325,8 @@ class LoadCellProbingMove:
         self._name = config.get_name()
         self._last_safety = None
         self._safety_reference_counts = None
+        self._diagnostic_sequence = 0
+        self._diagnostic_motion = None
 
     def set_safety_reference(self, reference_counts):
         # A caller may anchor a point after retracting into unloaded clearance.
@@ -382,6 +385,16 @@ class LoadCellProbingMove:
             'time_counts': [[s[0], s[2]] for s in selected]}
         # Host bulk samples may omit the exact sample which stopped the MCU.
         logging.info("Load cell probe failure: %s", json.dumps(report))
+        try:
+            motion = getattr(self, '_diagnostic_motion', None)
+            if motion is not None:
+                toolhead = self._printer.lookup_object('toolhead')
+                motion['frames']['after_probe'] = (
+                    load_cell_diagnostics.snapshot(self._printer, toolhead))
+                load_cell_diagnostics.log_report(samples, motion, toolhead,
+                    _lookup_z_pos, None, error=exc)
+        except Exception:
+            load_cell_diagnostics.warn('probe failure report')
 
     def _start_collector(self):
         toolhead = self._printer.lookup_object('toolhead')
@@ -455,6 +468,23 @@ class LoadCellProbingMove:
         phoming = self._printer.lookup_object('homing')
         # start collector after tare samples are consumed
         collector = self._start_collector()
+        if self._log_trace:
+            try:
+                self._diagnostic_sequence = getattr(
+                    self, '_diagnostic_sequence', 0) + 1
+                sensor = self._load_cell.get_sensor()
+                self._diagnostic_motion = {
+                    'name': self._name, 'tap_id': self._diagnostic_sequence,
+                    'collector_start_time': load_cell_diagnostics.number(
+                        collector.min_time),
+                    'target': list(pos[:3]), 'speed': speed,
+                    'sample_period': 1. / sensor.get_samples_per_second(),
+                    'safety': self._last_safety,
+                    'frames': {'before_probe': load_cell_diagnostics.snapshot(
+                        self._printer, toolhead)}}
+            except Exception:
+                self._diagnostic_motion = None
+                load_cell_diagnostics.warn('probe start')
         # do homing move
         try:
             epos = phoming.probing_move(self._mcu_trigger_analog, pos, speed)
@@ -464,8 +494,19 @@ class LoadCellProbingMove:
                 if self._log_trace:
                     self._log_probe_failure(exc, results)
             except Exception:
-                logging.exception("Unable to collect load-cell failure data")
+                load_cell_diagnostics.warn('failure data collection')
             raise
+        if self._log_trace:
+            try:
+                motion = getattr(self, '_diagnostic_motion', None)
+                if isinstance(motion, dict):
+                    motion.update({'trigger_time':
+                        self._mcu_trigger_analog.get_last_trigger_time(),
+                        'raw_z': epos[2]})
+                    motion['frames']['after_probe'] = (
+                        load_cell_diagnostics.snapshot(self._printer, toolhead))
+            except Exception:
+                load_cell_diagnostics.warn('probe end')
         return epos, collector
 
     # Wait for the MCU to trigger with no movement
@@ -528,10 +569,21 @@ class TappingMove:
         toolhead = self._printer.lookup_object('toolhead')
         # Homing workaround
         phoming = self._printer.lookup_object('homing')
-        if phoming.check_probe_first_home(gcmd):
+        first_home = phoming.check_probe_first_home(gcmd)
+        if first_home:
             curpos = toolhead.get_position()
             curpos[2] -= epos[2]
             toolhead.set_position(curpos)
+        if self._log_trace:
+            try:
+                motion = getattr(self._load_cell_probing_move,
+                                 '_diagnostic_motion', None)
+                if isinstance(motion, dict):
+                    motion['homing_workaround'] = bool(first_home)
+                    motion['frames']['after_workaround'] = (
+                        load_cell_diagnostics.snapshot(self._printer, toolhead))
+            except Exception:
+                load_cell_diagnostics.warn('homing reference')
 
         # Lift the toolhead while collecting the samples we will use for
         # the fit. The ascent data shall cover both the contact region
@@ -550,11 +602,36 @@ class TappingMove:
         # Collect samples until the end of the ascent
         move_end = toolhead.get_last_move_time()
         results = collector.collect_until(move_end)
-        samples = check_sensor_errors(results, self._printer)
-
-        # Perform fit on the ascent data
-        corrected_z = self._analyze_ascent(gcmd, samples, ascent_start_time,
-                                            toolhead, epos[2])
+        corrected_z, fit_error = None, None
+        try:
+            samples = check_sensor_errors(results, self._printer)
+            # Perform fit on the ascent data
+            corrected_z = self._analyze_ascent(gcmd, samples, ascent_start_time,
+                                                toolhead, epos[2])
+        except Exception as exc:
+            fit_error = exc
+            raise
+        finally:
+            if self._log_trace:
+                try:
+                    motion = getattr(self._load_cell_probing_move,
+                                     '_diagnostic_motion', None)
+                    if isinstance(motion, dict):
+                        motion.update({'ascent_start_time': ascent_start_time,
+                            'ascent_end_time': move_end,
+                            'ascent_sample_time': self._ascent_sample_time,
+                            'lift_speed': params['lift_speed'],
+                            'retract_distance': lift_dist,
+                            'sensor_errors': results[1]})
+                        motion['frames']['after_ascent'] = (
+                            load_cell_diagnostics.snapshot(
+                                self._printer, toolhead))
+                        load_cell_diagnostics.log_report(results[0], motion,
+                            toolhead, _lookup_z_pos,
+                            self._best_fit.find_best_fit,
+                            corrected_z, fit_error)
+                except Exception:
+                    load_cell_diagnostics.warn('ascent report')
         # Replace the probe result with the fitted Z position
         epos[2] = corrected_z
 

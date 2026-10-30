@@ -580,6 +580,45 @@ For requested commits, follow `docs/CONTRIBUTING.md`: use a short
    explains guided LOAD_CELL_CALIBRATE -> unloaded TARE -> known-load CALIBRATE
    -> ACCEPT -> SAVE_CONFIG, distinguishing persistent calibration/reference
    from a session-only LOAD_CELL_TARE. Never copy another printer's calibration.
+   Owner explicitly rolled back the proposed acceptance change limit
+   (2026-10-30). Do not reject a validated candidate solely because it differs
+   from the old offset, or require an extra recalibration override. The user
+   reviews the result and decides through AUTO_Z_OFFSET_ACCEPT, followed by
+   separate SAVE_CONFIG. Preserve existing force/thermal/fit/local/spatial,
+   stale-reference, idle and pending-offset checks. Retain all earlier LCD
+   fixes, README setup/photos and personal-path cleanup. No hardware actions,
+   configuration saves or service restarts were executed by the agent.
+   Current investigation (2026-10-30): owner reports automatic offsets around
+   1.48-1.52 mm press too hard and mark PEI, while 1.065 mm prints correctly.
+   Keep 1.065 unchanged and candidates diagnostic-only until cause is known;
+   no adoption guard/empirical correction or automatic acceptance is requested.
+   Manual PROBE_CALIBRATE about 1.482 mm agrees with automatic contact. Exclude
+   the unrelated 0.923 paper result as inconsistent contact, not thermal drift.
+   Phase-1 audit found the paired formula matches manual calibration; the
+   first-home rebase is inactive for AUTO_Z_OFFSET_TAP. Timestamps come from
+   fixed-frequency/MCU clock translation; no timing fault has been proven.
+   Marlin has active +0.05 mm thermal adjustment, commented 0.02 mm application,
+   descent filtering/calMinZ and babystepping; none establishes a 0.46 mm fix.
+   Retained ascent-only traces replay exactly but cannot establish descent
+   onset/hysteresis. New passive load_cell_diagnostics.py reuses existing
+   collected samples and the same LCBestFit model, logs bounded JSON for both
+   directions, stepper origins/timing, actual temperatures, tare and observed
+   peak force. Diagnostic estimates never change returned contact or motion.
+   The existing movement parameters, MCU force protections, calibration
+   formula and printer config stay untouched. Proposed one-contact hardware
+   test/deployment/reload requires explicit owner approval; none was executed.
+   Diagnostic review v2: isolate every cached reference getter and each heater/
+   stepper read. Curve comparison requires all four complete coordinate
+   snapshots, full stepper mappings, probe/G-code references, known inactive
+   mesh and history cutoff; reject transient reference changes as well.
+   JSON separates descent_fit_z, descent_threshold_z, mcu_trigger_z and
+   ascent_fit_z. Fits are model estimates, never exact physical contact.
+   Threshold detection assumes eight unloaded prefix samples and requires
+   three sustained samples above mean + max(5 * RMS noise, 1 g); it never
+   controls the MCU trigger or calibration. Guard diagnostic metadata,
+   snapshots/reporting and warning failures so primary results and safety
+   exceptions survive unchanged. Benchmark only offline; development-PC
+   timings must not be represented as Raspberry Pi 3B+ measurements.
 2. Read-only static LCD print-status display (owner-confirmed; preserve behavior).
 3. Power-loss recovery, PLR (future project; not in current scope).
 

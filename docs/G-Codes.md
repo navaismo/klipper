@@ -1122,6 +1122,17 @@ status report retains those values, physical XY and measured/target
 temperatures around the tap. For a one-off manual comparison without
 staging an offset, follow the same-point procedure in
 [Automatic Z-offset](AUTO_Z_OFFSET_PLAN.md#earlier-same-point-manual-comparison).
+Auto Z-offset also writes bounded `Load cell tap diagnostic: ` JSON entries
+from the existing descending/retracting tap, including force/Z/time, origin
+snapshots and diagnostic onset/release comparisons. These estimates do not
+change the primary fit, paired formula or force protections. See the
+version-2 fields `descent_fit_z`, `descent_threshold_z`, `mcu_trigger_z` and
+`ascent_fit_z` in the diagnostic JSON. Fits remain model estimates, not exact
+physical contact measurements. Incomplete/failed coordinate references prevent
+curve comparison; diagnostic failures only emit warnings and do not replace
+the existing probing result or safety errors. Read the
+[systematic error investigation](AUTO_Z_OFFSET_PLAN.md#systematic-offset-investigation-2026-10-30)
+before collecting new contacts. No automatic acceptance or save is performed.
 
 #### AUTO_Z_OFFSET_CALIBRATE
 

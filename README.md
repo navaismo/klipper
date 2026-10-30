@@ -158,6 +158,15 @@ Details and options: [LCD plan](docs/LCD_STATUS_PLAN.md),
 
 ## Automatic Z-offset calibration
 
+> [!WARNING]
+> **AUTOMATIC Z-OFFSET IS EXPERIMENTAL. VALIDATE BEFORE PRINTING.**
+>
+> The calculation is not perfect and may produce an inaccurate offset even
+> when measurements are repeatable and all checks pass. Keep your known-good
+> offset and verify nozzle-to-bed clearance before accepting or saving a new
+> value. **AN INCORRECT OFFSET CAN DRIVE THE NOZZLE INTO THE BUILD SURFACE
+> AND DAMAGE IT.**
+
 CR Touch remains the primary probe for homing and bed mesh. The stock load
 cell provides nozzle-contact measurements only to calculate its Z-offset;
 it does not replace CR Touch or register another virtual endstop. Start
@@ -171,6 +180,10 @@ with nozzle contact at the same physical point, accounting for probe XY
 offsets. P1 supplies the candidate; P2 validates agreement without averaging.
 The owner has completed two-point runs with LCD phase updates on hardware;
 initial first-layer qualification remains separate from measurement success.
+An investigation of a systematic difference from the working printing offset
+is documented in the [diagnostic audit](docs/AUTO_Z_OFFSET_PLAN.md#systematic-offset-investigation-2026-10-30).
+Keep the working offset; experimental candidates remain diagnostic-only until
+the cause is understood. Repeatability alone does not establish accuracy.
 
 ### 1. Configure and check the load cell
 
@@ -355,6 +368,7 @@ point/pair and reason.
 Previous heater targets are restored on exit, the mesh stays cleared and the
 existing offset remains active. KAMP can create a fresh mesh for the next
 print as usual. Successful measurement leaves a candidate in memory only.
+
 For initial qualification, keep a backup of the working configuration and
 validate first-layer behavior before adopting a new offset.
 
