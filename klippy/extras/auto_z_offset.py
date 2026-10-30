@@ -2,9 +2,11 @@
 # Copyright (C) 2026
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
+import json
 import logging
 import math
-from . import load_cell_probe, manual_probe
+import uuid
+from . import load_cell_diagnostics, load_cell_probe, manual_probe
 
 
 class AutoZOffset:
@@ -76,6 +78,18 @@ class AutoZOffset:
             self.printer.register_event_handler(event, self._disconnect)
         for event in ('homing:home_rails_begin', 'load_cell:calibrate'):
             self.printer.register_event_handler(event, self._invalidate)
+        self._frame_session = None
+        self._frame_pair = self._frame_auto_home = None
+        self._frame_rail_home = self._frame_last_set = None
+        self._frame_epoch = 0
+        try:
+            self._frame_session = uuid.uuid4().hex
+            self.printer.register_event_handler('toolhead:set_position',
+                                                self._frame_set_position)
+            self.printer.register_event_handler('homing:home_rails_begin',
+                                                self._frame_home_begin)
+        except Exception:
+            load_cell_diagnostics.warn('pair observer setup')
         self.gcode.register_command('AUTO_Z_OFFSET_TEST_CONTACT',
             self.cmd_TEST_CONTACT, desc="Perform one supervised nozzle tap")
         self.gcode.register_command('AUTO_Z_OFFSET_CALIBRATE',
@@ -84,6 +98,87 @@ class AutoZOffset:
             self.cmd_ACCEPT, desc="Stage the validated CR Touch Z offset")
         self.gcode.register_command('AUTO_Z_OFFSET', self.cmd_AUTO_Z_OFFSET,
             desc="Test both points and measure the CR Touch Z offset")
+
+    def _frame_set_position(self, *args):
+        # This event follows the existing setter; never wrap or call it.
+        try:
+            self._frame_epoch += 1
+            self._frame_last_set = self.reactor.monotonic()
+            if self.busy:
+                self._frame_event('set_position')
+        except Exception:
+            load_cell_diagnostics.warn('pair position event')
+
+    def _frame_home_begin(self, homing_state, rails):
+        try:
+            self._frame_rail_home = {
+                'id': uuid.uuid4().hex,
+                'eventtime': self.reactor.monotonic(),
+                'axes': list(homing_state.get_axes())}
+            if self.busy:
+                self._frame_event('home_rails_begin')
+        except Exception:
+            load_cell_diagnostics.warn('pair rail home event')
+
+    def _frame_event(self, event, cr=None, pos=None, trigger_z=None,
+                      offset=None, error=None, **fields):
+        # Observe cached state only; never flush, wait, query or change motion.
+        try:
+            if event == 'run_begin':
+                self._frame_pair = None
+            if event == 'pair_begin':
+                self._frame_pair = uuid.uuid4().hex
+            if event == 'home_requested':
+                self._frame_auto_home = {
+                    'id': uuid.uuid4().hex,
+                    'eventtime': self.reactor.monotonic()}
+            now = self.reactor.monotonic()
+            frame = load_cell_diagnostics.snapshot(self.printer, self.toolhead)
+            record = dict(fields, version=1, event=event, eventtime=now,
+                session_id=self._frame_session, pair_id=self._frame_pair,
+                stage=self.stage, frame=frame,
+                coordinate_epoch=self._frame_epoch,
+                last_set_position_time=self._frame_last_set,
+                automatic_home_request=self._frame_auto_home,
+                last_observed_rail_home=self._frame_rail_home,
+                cached_print_time=getattr(self.toolhead, 'print_time', None))
+            offsets = frame.get('probe_offsets')
+            record['active_z_offset'] = offsets[2] if offsets else None
+            try:
+                record['homed_axes'] = self.toolhead.get_status(now)[
+                    'homed_axes']
+                transform = (self.printer.lookup_object('gcode_move')
+                             .move_transform)
+                record['transform'] = {'type': type(transform).__name__,
+                                       'id': id(transform)}
+            except Exception as exc:
+                record['extra_reference_error'] = str(exc)[:160]
+            if cr is not None:
+                record['cr'] = {'test_z': cr.test_z, 'bed_z': cr.bed_z}
+            if event in ('tap_returned', 'pair_result'):
+                motion = getattr(self.tap.probing_move,
+                                 '_diagnostic_motion', None)
+                if isinstance(motion, dict):
+                    # Join the existing HX711 report; it precedes this event.
+                    record['tap_link'] = {key: motion.get(key) for key in (
+                        'name', 'tap_id', 'collector_start_time',
+                        'trigger_time', 'raw_z')}
+                record['regression_z'] = pos[2] if pos is not None else None
+                record['mcu_trigger_z'] = (trigger_z if trigger_z is not None
+                    else motion.get('raw_z')
+                    if isinstance(motion, dict) else None)
+            if offset is not None:
+                record['formula'] = {'candidate': offset,
+                    'cr_test_z': cr.test_z, 'cr_bed_z': cr.bed_z,
+                    'nozzle_regression_z': pos[2],
+                    'candidate_from_active_offset': offsets[2]
+                        + cr.bed_z - pos[2] if offsets else None}
+            if error is not None:
+                record['error'] = str(error)[:160]
+            logging.info('Auto Z-offset frame: %s',
+                         json.dumps(record, sort_keys=True, allow_nan=False))
+        except Exception:
+            load_cell_diagnostics.warn('pair frame event ' + event)
 
     def _connect(self):
         self.toolhead = self.printer.lookup_object('toolhead')
@@ -286,14 +381,21 @@ class AutoZOffset:
     def _measure_pair(self, gcmd, tap_gcmd, targets, point_index, sample_index,
                       fingerprint, lcd=None):
         point = self.points[point_index]
+        self._frame_event('pair_begin', point_index=point_index + 1,
+                          sample_index=sample_index + 1,
+                          saved_offset=fingerprint[0][2])
         self._check_thermal(targets)
         self._position(self.probe_positions[point_index])
         self._check_thermal(targets)
         self._update_lcd(lcd, 'cr_touch')
         self._check_thermal(targets)
+        self._frame_event('before_cr')
         cr = self._probe()
+        self._frame_event('after_cr', cr=cr)
         self._check_thermal(targets)
+        self._frame_event('before_nozzle_xy', cr=cr)
         self._position(point)
+        self._frame_event('after_nozzle_xy', cr=cr)
         self._check_thermal(targets)
         self._update_lcd(lcd, 'nozzle')
         self._check_thermal(targets)
@@ -303,7 +405,13 @@ class AutoZOffset:
             self.tap.probing_move.set_safety_reference(reference)
             self._check_thermal(targets)
         before = self._temperatures()
-        pos, valid = self.tap.tapping_move.run_tap(tap_gcmd)
+        self._frame_event('before_tap', cr=cr)
+        try:
+            pos, valid = self.tap.tapping_move.run_tap(tap_gcmd)
+        except Exception as exc:
+            self._frame_event('tap_failed', cr=cr, error=exc)
+            raise
+        self._frame_event('tap_returned', cr=cr, pos=pos)
         after = self._temperatures()
         self._check_thermal(targets)
         if not valid or not self._finite(pos[2]):
@@ -318,6 +426,8 @@ class AutoZOffset:
         if not self._finite(offset) or not \
                 self.min_offset <= offset <= self.max_offset:
             raise gcmd.error("Measured Z-offset outside valid range")
+        self._frame_event('pair_result', cr=cr, pos=pos,
+                          trigger_z=trigger_z, offset=offset)
         self.last_contact = {
             'point_index': point_index + 1, 'sample_index': sample_index + 1,
             'point': list(point), 'cr_trigger_z': cr.test_z,
@@ -473,6 +583,7 @@ class AutoZOffset:
         motion_started = False
         lcd = None
         self.busy = True
+        self._frame_event('run_begin')
         try:
             self.toolhead.wait_moves()
             self.stage = 'warm-up'
@@ -496,7 +607,9 @@ class AutoZOffset:
                 if self.printer.lookup_object('bed_mesh', None) is not None:
                     self.gcode.run_script_from_command('BED_MESH_CLEAR')
                 self.stage = 'homing'
+                self._frame_event('home_requested')
                 self.gcode.run_script_from_command('G28')
+                self._frame_event('home_returned')
                 self.toolhead.wait_moves()
                 self._check_idle()
                 mesh = self.printer.lookup_object('bed_mesh', None)

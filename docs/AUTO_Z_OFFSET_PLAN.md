@@ -32,6 +32,220 @@ followed by the existing SAVE_CONFIG workflow. Physical qualification and a
 supervised first-layer trial precede accepting a new candidate. The historical
 four-point qualification below explains the move to reference/validation.
 
+## Systematic offset investigation (2026-10-30)
+
+The owner reports a working printing offset of 1.065 mm, automatic results
+around 1.48-1.52 mm, and excessive nozzle pressure/PEI marks when adopting
+the automatic result. Manual PROBE_CALIBRATE at comparable hot conditions
+also returned about 1.482 mm. The unrelated 0.923 mm paper-contact result
+is excluded: inconsistent paper contact does not demonstrate thermal drift.
+Keep 1.065 mm unchanged. Experimental candidates remain diagnostic-only;
+do not accept/save them or print with them during this investigation.
+
+### Phase 1: confirmed coordinate and timing findings
+
+| Chain element | Confirmed source behavior | Consequence |
+| --- | --- | --- |
+| CR Touch result | `test_z` is the toolhead-frame trigger coordinate; `bed_z = test_z - old_offset`. | Do not subtract the old offset twice. |
+| Manual calibration | `old_offset - manual_bed_z + probe_bed_z`. | With the manual probe's zero offsets this reduces to `test_z - nozzle_z`. |
+| Automatic pair | `cr.test_z - fitted_nozzle_z`, at one physical bed XY. | Same sign and coordinate convention as manual calibration; the old offset cancels. |
+| Homing move | Returns the trigger position but sets toolhead position to the halt position, using step history. | Trigger and halt are not interchangeable. Both must be logged. |
+| First-home workaround | Only active for command G28 with HOME_ATTEMPT_NUM=1. | AUTO_Z_OFFSET_TAP does not enable it; a generic load-cell G28 may rebase Z. |
+| Z reconstruction | Converts historical MCU step counts through the current stepper coordinate mapping and kinematics. | A changed origin affects historical coordinates too; record mappings around the move. |
+| HX711 timestamps | FixedFreqReader estimates sample times from bulk counts and MCU clock regression; they are not host arrival times. | Configured 80 SPS is not blindly substituted for the measured clock rate. |
+| MCU trigger time | The analog trigger records its MCU clock and converts it to print_time on the host. | Compare it with bulk sample times in the same print_time domain. |
+
+The mathematical LCBestFit solution is the loaded-line/unloaded-constant
+hinge model. It estimates release during ascent, not first physical contact
+during descent. Current ascent logs alone cannot measure the gap between
+these events. The existing primary fit checks force sign, finite values,
+monotonic Z and sample support, but does not explicitly validate every sample
+timestamp for strict ordering before selection. This is a diagnostic gap,
+not proof that a timing fault caused the observed offset error.
+
+The local Marlin reference checkout was inspected on branch c13_sd, revision
+0cdabb7337ff08c6ab8c668907474cc9107694ea. The remote GitHub content could not
+be fetched during this audit, so equivalence to today's remote is unverified.
+Marlin descends in steps, filters a trailing force window, and calMinZ()
+selects a point from the normalized/rotated descent signal. It does not use
+Klipper's ascent-release estimator. Active NOZ_TEMP_OFT_MM adds 0.05 mm to
+the measured press value; the 0.02 mm NOZ_AUTO_OFT_MM application is commented
+out. Robust spatial weighting and a median-deviation clamp are active, but
+are not fixed corrections. SET_Z_OFFSET also schedules babystepping, with
+Marlin's negative offset convention and subsequent homing. None of these
+operations should be copied as a Klipper sign/origin correction.
+The reference's printTestResult reads three elements while Hight_One passes
+one-element arrays; those extra debug values are not reliable measurements.
+
+Twelve previously retained ascent traces replay with zero difference from
+their recorded fits. Their release-minus-trigger distances span roughly
+0.085-0.286 mm across the historical locations, and fitted free baselines
+range from -6.94 to +24.71 g relative to local tare. Model RMS is 2.08-4.52 g.
+These artifacts lack descent data and MCU trigger timestamps; they cannot
+establish the cause of the latest two-point error. Two representative traces
+are retained in `test/fixtures/load_cell_ascent_reference.json` for regression.
+
+### Hypotheses ranked by current evidence
+
+1. A shared physical reference or load-path bias remains a leading hypothesis:
+   automatic and manual calibration agree, yet the known printing adjustment
+   is smaller. Bed/plate compliance, preload/friction, nozzle contact state,
+   and CR Touch/toolhead mounting need separation. Repeatability and agreement
+   between two points do not demonstrate an unloaded, mechanically correct Z.
+   Ideal linear compliance alone is removed by the hinge extrapolation;
+   nonlinear load transfer, preload and friction are hypotheses to measure.
+2. Descent contact versus ascent release, with baseline changes, may explain
+   part of the bias. It has not been measured in both directions. The latest
+   reported 0.146979 mm trigger-to-regression difference is not a measurement
+   of full hysteresis and does not establish the entire approximately
+   0.46 mm discrepancy. No constant is subtracted.
+3. Sample-time alignment or a coordinate rebase can bias reconstructed Z.
+   No such event is proven in the reported run. At the configured 0.5/0.1 mm/s
+   speeds, a 0.1-second delay corresponds to about 0.05/0.01 mm on a steady
+   descent/ascent. A large timing explanation needs correspondingly large
+   measured errors, not an assumption about a single ADC conversion.
+4. A printing/calibration state difference remains possible but less supported.
+   The owner reports no hidden Z-offset commands in the print file. Available
+   configuration retains 1.065 mm; auto calibration clears the mesh and uses
+   toolhead-frame moves. Default mesh fade is disabled in the inspected setup.
+   The current Fluidd/KAMP include targets are inaccessible through their
+   symlinks, so their current contents and live G-code origins are not newly
+   certified. Earlier audits do not replace the new runtime snapshots.
+
+No unique physical root cause is established. In particular, a paper procedure
+and an automatic procedure agreeing does not prove either matches the desired
+first layer, but the bed marks make adopting the current candidate unsuitable.
+
+### Phase 2: passive tap instrumentation
+
+`load_cell_diagnostics.py` observes the existing collector and step history.
+It is enabled by the existing log_trace=True used by Auto Z-offset; the
+ordinary primary load-cell probe remains unchanged with tracing disabled.
+The collector still starts before descent, stays active through the same
+retraction and closes as before. No additional sampling, movement, queue
+flush or get_last_move_time call is introduced for diagnostics. Approach
+speed, Z minimum, trigger/force limits, retract distance, ascent window,
+primary LCBestFit result and paired formula are unchanged.
+
+Each `Load cell tap diagnostic: ` log entry contains one JSON object:
+
+- Original sample time, calibrated force, reconstructed Z, phase, raw counts
+  and per-sample tare. Times use seconds in print_time; Z uses millimeters
+  in the current kinematic frame, not G-code coordinates or absolute metrology.
+- MCU-derived trigger time, returned force-trigger Z, reconstructed Z at that
+  time, nearest bulk sample's time difference/force, and primary regression Z.
+- Version 2 distinguishes `descent_fit_z` (a diagnostic hinge-model estimate),
+  `descent_threshold_z` (the first sample in a sustained force rise),
+  `mcu_trigger_z` (the original returned MCU trigger position) and
+  `ascent_fit_z` (the independent diagnostic release fit). Neither fit is an
+  exact measurement of physical contact. `regression_contact_z` remains the
+  existing primary result; no diagnostic estimate replaces it.
+- Independent diagnostic hinge fits for descent and ascent, using the same
+  LCBestFit model. The descent rows are reversed in time, never sorted by Z.
+  Estimates require finite, ordered times/coordinates, positive compression,
+  three samples on each side, adequate signal relative to free-region noise,
+  and an approximately flat free region. These quality checks affect only
+  diagnostic estimates, never the existing probing result or safety trigger.
+- When both fits are supported and the references are complete and consistent,
+  `ascent_minus_descent_fit_mm` and `baseline_change_g`. The historical
+  `release_minus_onset_mm` is retained as an alias of the fit difference,
+  not an independently measured physical hysteresis. They remain null when data
+  cannot support comparison; an identified fit is not certified physical zero.
+- Local/saved tare, baseline force, point safety reference, configured limits
+  and the maximum force among all host-collected samples. This observed peak
+  is not a guarantee of the exact MCU/physical maximum between samples.
+- Cached actual/target temperatures, active probe offsets, G-code origin,
+  G-code position, mesh state, stepper coordinate mappings before/after
+  probing and the first-home workaround, and the motion-history cutoff.
+
+The trigger region is a timestamp classification from one nominal sample
+period before the trigger through ascent start; it is not a separately
+detected physical contact event. Actual sample interval statistics are also
+logged. Reconstruction older than available history is marked unavailable.
+Missing/invalid/non-increasing timestamps, missing boundaries, sensor errors
+or changed origins prevent a comparable estimate. Each reference getter is
+isolated: a failed probe read does not suppress mesh, G-code origin or history
+reads, and a failed heater/stepper does not suppress its siblings.
+`quality.references_complete` requires all four snapshots, finite coordinates,
+complete stepper-name/mapping sets, probe offsets, G-code origin/position,
+known inactive mesh, history cutoff and successful coordinate-reference reads.
+Transient mapping/origin/offset changes are checked at every snapshot, even
+if restored later. Optional temperature-read failures remain visible but do
+not by themselves invalidate coordinate references; this observer does not
+replace the existing thermal safety checks. Missing references produce
+`incomplete_references`, never a comparable pair of curves.
+Diagnostic fitting errors
+produce a reason, and observer exceptions never replace a primary result or
+mask an original probing error. If acquisition fails before returning any
+samples, no complete curve can be recovered from those unavailable data.
+Every diagnostic integration boundary is guarded, including metadata updates,
+snapshots and final reporting while a primary exception is being propagated.
+Failures emit a warning; a failed warning handler is also contained.
+
+The threshold detector is independent of either fit. It assumes the first
+eight descent samples are unloaded, estimates their mean and RMS noise, and
+requires three consecutive later samples above mean + max(5 * RMS, 1 g).
+An obviously trending baseline, insufficient data, reversed descent or no
+sustained crossing leaves the threshold unavailable with a reason. A lone
+spike is insufficient. The reported Z/time belong to the first sample of the
+confirmed run; there is no interpolation or ADC-latency correction. The
+unloaded-prefix assumption cannot be proven from force alone. This threshold
+is diagnostic only and is neither the MCU stopping threshold nor physical zero.
+
+Logs contain at most 2048 sample rows, with count/stride metadata and retained
+endpoints, trigger neighbourhood, peak and phase boundaries. At the working
+80 SPS the usual tap fits within this budget. Faster/longer captures are
+explicitly decimated; no missing curve is fabricated. Full extrema are taken
+before decimation. Captures of at most 2048 samples retain every sample and
+its original timestamp. Existing ascent-only and safety logs remain available.
+No MCU or panel firmware change is required. Update the host helper together
+with load_cell_probe.py; deployment/reload is an operator step, not performed
+by this work.
+
+### Phase 3: offline checks and proposed hardware test
+
+The focused suite covers ideal contact, hysteresis, mechanical compliance,
+baseline drift, delayed/bad/missing timestamps, coordinate shifts, different
+probe offsets, incomplete release, noise, failed fits, bounded JSON, legacy
+real ascent replay, and observer failure. Integration mocks compare logging
+enabled/disabled and require identical moves, primary result, force-trigger
+Z, collector reuse/closure, and the same two existing move-time reads.
+The original 106 contact/workflow tests remain required alongside these
+diagnostic tests. Tests are offline and do not qualify physical contact.
+
+Run all offline unit/native harness tests with:
+
+```bash
+python3 -B -m unittest discover -s test/unit -p 'test_*.py'
+```
+
+The reproducible report benchmark uses synthetic 500/2048-sample taps, both
+valid diagnostic fits and the real shared LCBestFit implementation:
+
+```bash
+python3 -B scripts/bench_load_cell_diagnostics.py --iterations 200 --warmup 10
+```
+
+It reports actual CPU/architecture/Python identity, source hashes, sample/log
+counts, JSON size and minimum/median/p95/maximum/mean processing times. Separate
+timings cover report construction and construction plus JSON serialization.
+Synthetic position lookups exclude real MCU step-history costs, disk logging,
+sensor/UART traffic and scheduler contention. Results from a development PC
+are not Raspberry Pi 3B+ measurements; no reliable Pi time follows from them.
+The script imports offline printer mocks and never connects to a printer.
+
+Proposed next hardware test, pending explicit owner approval: deploy/reload
+the diagnostic host files while idle, verify the working offset is still
+1.065 mm, and perform one supervised existing TEST_CONTACT at P1 with the
+current validated parameters. Confirm homed XYZ and an inactive mesh first;
+any needed homing/mesh-clear/heating is part of that approval, not an action
+already performed. Keep temperatures consistent with the comparison and use
+the existing targets/force limits. Retrieve the JSON entry together with the
+paired CR Touch result, safety and ascent logs. Stop on any measurement error.
+Do not accept a candidate, save configuration or print. Compare onset,
+release, trigger reconstruction, baseline shift and frame/timing flags offline
+before proposing further tests or any change to contact detection.
+
 ### Current two-point setup
 
 In the existing `[auto_z_offset]` section, replace the four-row `probe_points`
