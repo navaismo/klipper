@@ -76,7 +76,8 @@ class AutoZOffset:
         self.printer.register_event_handler('klippy:connect', self._connect)
         for event in ('klippy:disconnect', 'klippy:shutdown'):
             self.printer.register_event_handler(event, self._disconnect)
-        for event in ('homing:home_rails_begin', 'load_cell:calibrate'):
+        for event in ('homing:home_rails_begin', 'homing:home_axes',
+                      'load_cell:calibrate'):
             self.printer.register_event_handler(event, self._invalidate)
         self._frame_session = None
         self._frame_pair = self._frame_auto_home = None

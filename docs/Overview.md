@@ -62,6 +62,8 @@ communication with the Klipper developers.
 
 ## Developer Documentation
 
+- [Upstream integration](UPSTREAM_INTEGRATION.md): Fork validation and
+  isolated updates from upstream.
 - [Code overview](Code_Overview.md): Developers should read this
   first.
 - [LCD status project](LCD_STATUS_PLAN.md): Fork-specific static LCD

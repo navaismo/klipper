@@ -119,6 +119,7 @@ nav:
     - Exclude_Object.md
     - Using_PWM_Tools.md
   - Developer Documentation:
+    - UPSTREAM_INTEGRATION.md
     - Code_Overview.md
     - LCD_STATUS_PLAN.md
     - AUTO_Z_OFFSET_PLAN.md

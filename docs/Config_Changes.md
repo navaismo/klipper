@@ -8,6 +8,11 @@ All dates in this document are approximate.
 
 ## Changes
 
+20261101 (fork Auto Z-offset homing): Completed homing now invalidates a
+pending candidate and contact qualification, including Z-only homing through
+CR Touch. Early rail invalidation remains active. Run fresh qualification and
+calibration after homing; saved offsets and sensor calibration are unchanged.
+
 20261029 (fork Auto Z-offset preparation and partial LCD): AUTO_Z_OFFSET now
 warms up, clears an active bed mesh, runs G28 and checks readiness again before
 the P1/P2 tests. Its configured bed default changes from 60 to 50 C; nozzle
