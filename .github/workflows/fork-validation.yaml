@@ -1,0 +1,72 @@
+name: Fork validation
+
+on:
+  push:
+    branches: [master, feature/lcd_status, feature/Auto_Z_offset]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    name: Offline tests (${{ matrix.source }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        source: [branch, upstream-merge]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi libnewlib-arm-none-eabi
+          python -m pip install -r scripts/lcd-requirements.txt
+      - name: Prepare source tree
+        id: source
+        env:
+          FORK_SOURCE_VARIANT: ${{ matrix.source }}
+        run: |
+          if [ "$FORK_SOURCE_VARIANT" = upstream-merge ]; then
+            git fetch --no-tags https://github.com/Klipper3d/klipper.git master
+            FORK_MERGED_TREE=$(git merge-tree --write-tree HEAD FETCH_HEAD)
+            FORK_SOURCE_DIR="$RUNNER_TEMP/upstream-merge"
+            mkdir -p "$FORK_SOURCE_DIR"
+            git archive "$FORK_MERGED_TREE" | tar -x -C "$FORK_SOURCE_DIR"
+          else
+            FORK_SOURCE_DIR="$GITHUB_WORKSPACE"
+          fi
+          echo "path=$FORK_SOURCE_DIR" >> "$GITHUB_OUTPUT"
+      - name: Check fork source whitespace
+        working-directory: ${{ steps.source.outputs.path }}
+        run: |
+          python scripts/check_whitespace.py \
+            .github/workflows/fork-validation.yaml scripts/test_fork.py \
+            test/unit/test_homing_events.py docs/UPSTREAM_INTEGRATION.md
+      - name: Run offline Python and native-C tests
+        working-directory: ${{ steps.source.outputs.path }}
+        run: |
+          python -B scripts/test_fork.py --require-native \
+            --log "$RUNNER_TEMP/fork-tests.log" -v
+      - name: Build STM32F103 with USART2 LCD
+        working-directory: ${{ steps.source.outputs.path }}
+        run: |
+          cp test/configs/stm32f103-tjc.config .config
+          make olddefconfig
+          make -j2
+      - name: Upload diagnostic log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fork-tests-${{ matrix.source }}
+          path: ${{ runner.temp }}/fork-tests.log
+          if-no-files-found: ignore

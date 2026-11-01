@@ -21,6 +21,7 @@ fake_mcu.MCU_trsync = types.SimpleNamespace(REASON_COMMS_TIMEOUT=10)
 with mock.patch.dict(sys.modules, {PACKAGE: package, 'mcu': fake_mcu}):
     auto = importlib.import_module(PACKAGE + '.auto_z_offset')
     bedmesh = importlib.import_module(PACKAGE + '.bed_mesh')
+    homing = importlib.import_module(PACKAGE + '.homing')
 lcprobe = auto.load_cell_probe
 
 
@@ -245,9 +246,10 @@ class Printer:
     def script(self, script):
         self.trace.append(('gcode', script))
         if script == 'G28':
-            for callback in self.events.get('homing:home_rails_begin', []):
-                callback(None, None)
+            state = types.SimpleNamespace(get_axes=lambda: [0, 1, 2])
+            self.send_event('homing:home_rails_begin', state, [])
             self.toolhead.homed = 'xyz'
+            self.send_event('homing:home_axes', state)
         elif script == 'BED_MESH_CLEAR':
             mesh = self.objects.get('bed_mesh')
             if mesh is not None:
@@ -265,6 +267,8 @@ class Printer:
         return self.objects[name]
     def register_event_handler(self, name, callback):
         self.events.setdefault(name, []).append(callback)
+    def send_event(self, name, *args):
+        return [callback(*args) for callback in self.events.get(name, [])]
     def is_shutdown(self):
         return self.shutdown
     def add_object(self, name, value):
@@ -343,6 +347,37 @@ class WorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'TEST_CONTACT'):
             self.module.cmd_CALIBRATE(Gcmd())
         self.assert_no_motion_or_heat()
+    def test_z_probe_home_invalidates_candidate_preserving_offset(self):
+        self.calibrate()
+        self.assertIsNotNone(self.module.candidate)
+        before = self.printer.primary.offsets
+        pending = {name: dict(values)
+                   for name, values in self.printer.pending.items()}
+        home = homing.Homing(self.printer)
+        home.set_axes([2])
+        home._set_start_position = mock.Mock()
+        home._probing_home = mock.Mock()
+        rail = mock.Mock()
+        rail.get_endstops.return_value = [(
+            types.SimpleNamespace(get_position_endstop=lambda: before[2]), 'z')]
+        rail.get_homing_info.return_value = types.SimpleNamespace(
+            speed=5., retract_dist=0.)
+        home.home_rails([rail], [None, None, 5.], [None, None, 0.])
+        self.assertIsNone(self.module.candidate)
+        self.assertIsNone(self.module.result)
+        self.assertFalse(self.module.contact_verified)
+        self.assertEqual(self.module.verified_points, {})
+        self.assertEqual(self.printer.primary.offsets, before)
+        self.assertEqual(self.printer.pending, pending)
+        with self.assertRaisesRegex(RuntimeError, 'No validated'):
+            self.module.cmd_ACCEPT(Gcmd())
+    def test_completed_home_requires_fresh_contact_qualification(self):
+        self.module.cmd_TEST_CONTACT(Gcmd())
+        self.assertTrue(self.module.contact_verified)
+        self.printer.send_event('homing:home_axes',
+            types.SimpleNamespace(get_axes=lambda: [2]))
+        with self.assertRaisesRegex(RuntimeError, 'TEST_CONTACT'):
+            self.module.cmd_CALIBRATE(Gcmd())
     def test_supervised_test_uses_same_engine_without_candidate(self):
         self.module.cmd_TEST_CONTACT(Gcmd())
         self.assertTrue(self.module.contact_verified)
@@ -1587,6 +1622,7 @@ class EngineTests(unittest.TestCase):
         sensor_factory.assert_called_once()
         cell_factory.assert_called_once()
         self.assertIs(self.printer.objects['probe'], primary)
+        self.assertTrue(primary._probe_session.nozzle_probe)
         self.printer.objects['pins'].register_chip.assert_called_once()
         self.assertIn('PROBE', self.printer.gcode.commands)
         self.assertIn('LOAD_CELL_TEST_TAP', self.printer.gcode.commands)
