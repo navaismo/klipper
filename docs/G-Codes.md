@@ -342,11 +342,14 @@ Also provided is the following extended G-Code command:
 
 ### [lcd_status]
 
-The following fork-specific command is available when an
+The following fork-specific commands are available when an
 [lcd_status config section](Config_Reference.md#lcd_status) is enabled.
 By default it also prepares fresh data automatically before
 `SDCARD_PRINT_FILE` or the first `M24` after selecting a file, without
 repeating on pause/resume. Set `auto_prepare: False` for manual use only.
+See the [complete setup guide](TJC_LCD_Setup.md) for firmware capabilities,
+configuration, dependencies and idle testing. Quote filenames containing
+spaces, for example `LCD_RENDER FILENAME="parts/example part.gcode"`.
 
 #### LCD_PREPARE
 
@@ -376,17 +379,31 @@ static card without starting a print. Requires both `[lcd_status]` and
 `[tjc_lcd]`, matching job-render MCU firmware, and an idle printer.
 The command waits for acknowledged transfer, CRC validation and the MCU's
 final protocol checkpoint. Missing thumbnails retain the text-only
-fallback. Output explicitly reports whether a 96x96 thumbnail was included
+fallback. Output explicitly reports whether a prepared thumbnail was included
 and displays preparation warnings; automatic preparation logs warnings
 in `klippy.log`. When automatic preparation is enabled, the same render path
 runs before the first file G-code; no `START_PRINT` macro change is needed.
+With `TJC_DRAW_VERSION=1`, the host composes the new static print card
+and enlarges the prepared 96x96 thumbnail to 120x120 on the panel. The
+header reads `PRINTING` in orange, and the footer reads `Press Knob to Pause`.
+All generic drawing batches finish before the command returns or printing
+can start. The completed card is static during printing and pause/resume.
+This manual command remains usable after an LCD error: while idle it
+requests bounded handshake/clear recovery, then retries the card. It
+does not start a print or restart Klipper/firmware. Failure to recover
+remains an error; automatic print preparation retains its error gate.
+Manual errors are prefixed `LCD_RENDER failed`; acknowledgement timeouts
+include the token and expected offset/state, with the last received reply
+in `klippy.log`.
 
 ### [tjc_lcd]
 
 The following fork-specific commands require the
 [tjc_lcd config section](Config_Reference.md#tjc_lcd) and matching MCU
-firmware. Both require an idle printer and reject printing/paused jobs.
-They return when the request is sent; inspect `tjc_lcd.state` for completion.
+firmware. All require an idle printer and reject printing/paused jobs.
+Initialization and clear return when the request is sent; inspect
+`tjc_lcd.state` for completion and wait for `ready` before another operation.
+`TJC_LCD_IDLE` waits for the completed render checkpoint.
 
 #### TJC_LCD_INIT
 
@@ -401,18 +418,42 @@ a handshake failure while idle.
 `TJC_LCD_CLEAR [COLOR=<integer>]`: Request a clear after initialization
 has succeeded. COLOR is an RGB565 integer from 0 to 65535; it defaults
 to the configured `clear_color`. This only clears the screen; it does
-not send job text or thumbnails. Do not put these commands inside the
+not send job text, thumbnails or an idle screen. Once the clear finishes,
+use `TJC_LCD_IDLE` to restore Idle. Do not put these commands inside the
 printing file or its start/end macros.
 
 #### TJC_LCD_IDLE
 
 `TJC_LCD_IDLE`: Render the static idle logo, printer name, repository URL
-and Idle indicator without starting a print. Requires ready Klipper,
+and Idle indicator with the connected LCD MCU's firmware revision without
+starting a print. With generic drawing firmware, a small host-rendered
+footer below Idle includes the MCU compilation date as `YYYY-MM-DD`.
+Requires ready Klipper,
 matching v5 MCU firmware, and an idle/unpaused printer. It waits for queued
 movements and the final render checkpoint. This screen also appears once
 after startup initialization and after completion/cancellation once motion
-has finished. Pauses and errors preserve the job card. Labels on the job
-card are yellow; values remain white, and layer height uses `L. Height:`.
+has finished. Pauses and errors preserve the job card.
+With the optional [tjc_menu](Config_Reference.md#tjc_menu), this command
+also closes the knob menu. Initialization and clear invalidate pending
+menu input as well.
+
+### [tjc_menu]
+
+The optional [tjc_menu config section](Config_Reference.md#tjc_menu)
+registers no additional G-code commands. Rotate from visible Idle to open
+Menu, click to enter/execute, or hold for 0.8 seconds to return to Idle.
+Navigation redraws have a fixed 200 ms cooldown, with one pending latest
+selection. Menu Home uses the existing `G28` command; other idle actions
+use normal host heater/motion interfaces. Load/Unload heat to 240 C and
+accept a cancel press; both turn the nozzle off after cleanup. See the
+[action table](TJC_LCD_Setup.md#knob-controls-and-actions) for distances,
+speeds, homing and travel checks.
+
+During an active print, a new debounced knob press executes the existing
+`PAUSE` command once, including configured macro overrides. No screen
+update or automatic `RESUME` is issued; paused clicks and printing-time
+rotation are ignored. The print-pause and filament-cancel presses do not
+use the navigation cooldown.
 
 ### [dual_carriage]
 

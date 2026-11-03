@@ -1,162 +1,126 @@
-# Klipper for the Ender-3 V3 SE 
+# Klipper for the Ender-3 V3 SE
 
-A klipper fork that reuses
-the Ender-3 V3 SE's original TJC LCD while keeping it connected to the
-mainboard. Validated on hardware with an STM32F103RET6 and TJC3224T1.
+This Klipper fork reuses the original TJC LCD and knob while keeping the
+screen connected to the printer mainboard. The owner confirmed the current
+appearance on an STM32F103RET6 mainboard with a TJC3224T1 display; the
+photos below show this setup on hardware.
 
 ## Fork features
 
-- A Klipper idle screen at startup and after a completed or cancelled job,
-  once pending movements have finished.
-- An automatic job card before the first G-code: thumbnail, total layers,
-  layer height, estimated duration in `hh:mm:ss`, material, filename and
-  first-layer nozzle/bed temperature targets.
-- Balanced, centered filename wrapping, yellow labels, cyan icons and
-  temperature degree symbols. The displayed filename omits `.gcode`.
-- 96×96 thumbnails with a 64-color palette. The host prepares RGB565 and
-  transfers rectangles grouped by color when smaller, with raw RGB565 as
-  a fallback. Transport compression preserves the prepared image pixels.
-- Moonraker metadata collection and a C renderer on the mainboard's
-  USART2. No LCD connection to the Raspberry Pi is required.
+- Idle screen at startup and after completed/cancelled jobs, with the
+  connected MCU's firmware revision and compilation date below `Idle`.
+- Host-designed knob menus for homing, preheating, 10 mm XYZ movements,
+  and filament loading/unloading at 240 C with press-to-cancel support.
+- A static card rendered before the first print G-code: 120x120 displayed
+  thumbnail, layers, layer height, estimated total duration, material,
+  wrapped filename and first-layer nozzle/bed targets. `PRINTING` is orange.
+- A debounced knob press during printing runs the configured `PAUSE`
+  command once. The card stays visible; resume through Fluidd/Moonraker.
+- Screen designs, colors, labels, artwork and navigation stay on the host.
+  Once generic drawing firmware is installed, visual updates need no flash.
 
-**These views are intentionally static to keep LCD work from interfering
-with print quality.** The card is rendered before printing and remains
-unchanged throughout the job, including pauses. There is no live progress,
-current-layer or temperature polling/display. Nozzle and bed values are
-first-layer targets from the file, not sensor readings; ETA is the total
-estimated duration. The driver stops its UART and operation timer after
-rendering. The screen provides no menus or printer controls.
+**The print card is intentionally static.** There is no live progress,
+current-layer, remaining-time or temperature refresh during printing or
+pause. Card temperatures come from the file, not heater readings. Only an
+active idle Load/Unload operation refreshes changed nozzle temperatures.
+The mainboard C driver owns LCD USART2, framing and bounded drawing work;
+the host never opens an LCD serial port.
 
 ## Hardware photos
 
-| Idle screen | Print job card |
+These owner-supplied photos replace the earlier idle/card examples. They
+show the current idle footer, both menus and two print cards. They confirm
+appearance, not measured rendering time or print-quality impact.
+
+<img src="Screenshots/IdleV7.jpg" alt="Idle screen with Klipper branding and MCU firmware revision and build date" width="300">
+
+| Main menu | Movement submenu |
 | --- | --- |
-| <img src="Screenshots/final_idle_lcd.jpg" alt="Original LCD showing the Klipper idle screen" width="300"> | <img src="Screenshots/final_card-v6.jpg" alt="Original LCD showing the thumbnail and static print job data" width="300"> |
+| <img src="Screenshots/Menu1.jpg" alt="Main knob menu with Home, Load, Unload, Preheat, More Moves and hold-to-idle hint" width="300"> | <img src="Screenshots/Menu2.jpg" alt="Movement submenu with six 10 mm XYZ actions and Back" width="300"> |
 
-## Firmware build
-
-Start with a working Klipper/Moonraker installation and the usual Klipper
-firmware build environment. The Klippy service must use this complete
-fork: copying only the extras does not install the hook that prepares the
-card before printing.
-
-```sh
-git  https://github.com/navaismo/klipper.git ~/klipper
-cd ~/klipper
-make menuconfig
-```
-
-If you already use this fork, work from the existing checkout. Save your
-current `.config` and select the settings validated on this board:
-
-| Setting | Value |
+| Print card: skull case | Print card: slingshot |
 | --- | --- |
-| Extra low-level configuration options | Enabled |
-| Architecture | STMicroelectronics STM32 |
-| Processor | STM32F103 |
-| Bootloader | 28 KiB, application at `0x08007000` |
-| Clock reference | 8 MHz crystal; MCU runs at 72 MHz |
-| Klipper–mainboard communication | Serial USART1, PA10/PA9 |
-| Klipper serial baud | 250000 |
-| LCD | Enable `TJC LCD on USART2 PA2/PA3 (Ender-3 V3 SE)` |
+| <img src="Screenshots/PrintPage1.jpg" alt="Static skull-case print card with enlarged thumbnail and Press Knob to Pause footer" width="300"> | <img src="Screenshots/PrintPage2.jpg" alt="Static slingshot print card with orange PRINTING label and file temperature targets" width="300"> |
 
-The LCD option enables `CONFIG_TJC_LCD=y`. The screen uses USART2,
-PA2 TX / PA3 RX, at 115200 baud, 8N1. On this board, the USB-C cable
-between the Raspberry Pi and mainboard carries Klipper's USART1 serial
-link; do not select USART2 for the host interface. PA2/PA3 are reserved
-for the LCD.
+## Setup
 
-```sh
-make -j2
-```
+Follow the [complete LCD and knob setup guide](docs/TJC_LCD_Setup.md)
+for first installation, firmware settings, dependencies, configuration,
+commands, troubleshooting, updates and rollback.
 
-The output is `out/klipper.bin`. Install it using your board's usual
-flashing procedure while the printer is idle. A minimal reference is
-[test/configs/stm32f103-tjc.config](test/configs/stm32f103-tjc.config).
-Update the host and MCU together; rendering requires firmware advertising
-`TJC_JOB_VERSION=5`. This procedure does not update the LCD's own firmware.
+The required setup is:
 
-## Host dependencies
+1. Run this complete fork in the Klippy service. The current development
+   branch is `feature/lcd_status`; copying only extras into upstream
+   Klipper does not install the virtual SD hooks.
+2. Use mainboard firmware with `TJC_LCD_VERSION=1`, `TJC_JOB_VERSION=5`,
+   `TJC_DRAW_VERSION=1`, and GPIO button support. Keep the confirmed 28 KiB
+   bootloader, 8 MHz crystal and USART1 host settings. An already compatible
+   MCU needs no reflash for these new designs.
+3. Install [Klippy requirements](scripts/klippy-requirements.txt), including
+   Pillow, in the running service's Python environment.
+4. Include [sample-tjc-lcd.cfg](config/sample-tjc-lcd.cfg) once in the active
+   printer configuration. It enables `[tjc_lcd]`, `[lcd_status]` and
+   `[tjc_menu]`; retain the existing virtual SD path and printer settings.
+5. Reload Klipper while idle. Enable slicer PNG/JPEG thumbnails, preferably
+   at least 192x192, and start prints normally from Fluidd/Moonraker.
 
-Pillow is included in [scripts/klippy-requirements.txt](scripts/klippy-requirements.txt).
-Installers and updaters that manage this file install it in Klippy's
-Python environment. For a manual update, run from this checkout using
-the service interpreter; with the standard virtual environment:
+Do not add LCD commands or scripts to `START_PRINT`. With the default
+`auto_prepare: True`, metadata and all drawing complete before the first
+file G-code. Metadata/render failures prevent start; thumbnail failures
+allow a text-only card and report warnings. The prepared 96x96 RGB565 image
+is displayed at 120x120 with its colors preserved.
 
-```sh
-~/klippy-env/bin/python -m pip install -r scripts/klippy-requirements.txt
-```
+The working host link is USART1 PA9/PA10 at 250000 baud over the mainboard's
+USB-C connection. LCD USART2 reserves PA2/PA3 at 115200 baud. The knob pins
+are `encoder_pins: ^PA11, ^PA12` and `click_pin: ^!PB1`. Do not assign them
+to other devices or enable a generic `[display]` driver for this LCD.
 
-Adjust the path if your service uses another environment. No packages are
-installed from a render callback. Without Pillow, text can still render,
-but the thumbnail is unavailable and a warning is reported.
+## Knob operation
 
-## printer.cfg setup
+Turn either way from visible Idle to open Menu. Clockwise highlights the
+next entry down; counterclockwise highlights the previous entry. Click to
+enter/execute. Hold for 0.8 seconds to return to Idle, as indicated by
+`Press&Hold Knob: Idle Screen`. An idle click does nothing.
 
-Keep your existing motor, sensor, MCU and macro configuration. Add these
-sections, or update existing sections without duplicating them:
+Fast turns share one pending redraw, with a 200 ms cooldown after the
+previous draw completes. Successful Home, Preheat and Movement actions
+keep the menu/highlight without redrawing. Home uses the configured `G28`;
+preheat sets bed 50 C/nozzle 170 C. Movement requires homing and a full
+in-range 10 mm destination; Front is Y +10 mm and Back is Y -10 mm.
 
-```ini
-[tjc_lcd]
-mcu: mcu
-startup_delay: 1.0
-handshake_timeout: 1.0
+Load heats to 240 C, feeds 50 mm at F800 and 40 mm at F400. Unload heats
+to 240 C, purges 15 mm at F400 and retracts 90 mm at F800. Speeds are
+mm/min. `Press to cancel` stops after the active drawing transaction or
+queued extrusion segment (at most 1 mm), turns the nozzle off and returns
+to Menu. Completion and recoverable errors also turn the nozzle off;
+G-code state is restored and the bed target is unchanged.
 
-[lcd_status]
-auto_prepare: True
-moonraker_url: http://127.0.0.1:7125
-request_timeout: 3.0
-# moonraker_api_key: YOUR_API_KEY
-```
+During printing only a fresh debounced press runs `PAUSE`; rotations and
+paused clicks do nothing. Pause/cancel clicks do not use the navigation
+cooldown. Resume through the normal host UI. The full
+[controls and action table](docs/TJC_LCD_Setup.md#knob-controls-and-actions)
+describes the menu and its limits.
 
-`path` must match your G-code directory; keep the existing value if
-`[virtual_sdcard]` is already configured. Adjust the URL for a different
-Moonraker address and set an API key only if your installation requires
-one. Do not add a `[display]` section for this screen or reassign PA2/PA3.
-After deploying the firmware and modules, reload Klipper while the
-printer is idle to load the new sections.
+## Commands and diagnostics
 
-With `auto_prepare: True`, starting a job through Moonraker/Fluidd or
-`M23`/`M24` prepares and renders the card before the first G-code. **Do not
-add a script or `LCD_RENDER` call to `START_PRINT`.** A pause preserves the
-card; completion or cancellation restores the idle screen after the
-end/cancel macro and pending movements finish. Entering idle is also
-handled without periodic redraws.
+While idle, `LCD_PREPARE FILENAME="parts/example.gcode"` prepares data only;
+`LCD_RENDER FILENAME="parts/example.gcode"` draws a test card without
+starting a print. After an LCD error, explicit idle `LCD_RENDER` retries
+bounded initialization before drawing; automatic print preparation still
+rejects a failed LCD. No timeout is accepted as success.
 
-Enable PNG/JPEG thumbnails in your slicer so Moonraker can extract them
-along with file metadata. When available, a source image of at least
-192×192 is preferred and reduced to 96×96 on the host. A thumbnail failure
-preserves a text-only card with warnings. Metadata or rendering errors
-prevent the job from starting and report the problem for correction.
+`TJC_LCD_IDLE` restores Idle and closes the menu. `TJC_LCD_INIT` requests
+initialization; `TJC_LCD_CLEAR COLOR=0` requests a black clear. Wait for
+`tjc_lcd.state: ready` after initialization/clear. Inspect `lcd_status`,
+`tjc_lcd` and `tjc_menu` through the usual printer object API; reads are
+passive. All manual LCD commands reject printing/paused jobs.
 
-## Checking the display while idle
-
-From Fluidd's G-code console:
-
-```gcode
-TJC_LCD_IDLE
-LCD_PREPARE FILENAME="example.gcode"
-LCD_RENDER FILENAME="example.gcode"
-```
-
-`LCD_PREPARE` only prepares data; `LCD_RENDER` prepares and draws without
-starting a print. Replace the filename with an existing Moonraker file.
-`TJC_LCD_INIT` repeats initialization and `TJC_LCD_CLEAR` clears the screen.
-These commands reject requests while printing or paused. Warnings and
-results are exposed through the `lcd_status` and `tjc_lcd` status objects.
-
-Details and options: [LCD plan](docs/LCD_STATUS_PLAN.md),
+References: [setup and recovery](docs/TJC_LCD_Setup.md),
 [configuration](docs/Config_Reference.md#lcd_status),
-[driver](docs/Config_Reference.md#tjc_lcd) and
-[commands](docs/G-Codes.md#lcd_status).
-
-## Repository and updates
-
-This checkout's `origin` points to
-`https://github.com/navaismo/klipper.git` for fetch and push. `upstream`
-identifies the original project and is retained for synchronization.
-Configure updaters to use this fork and the branch containing LCD support;
-updating directly from upstream does not include these features.
+[commands](docs/G-Codes.md#lcd_status),
+[status fields](docs/Status_Reference.md#lcd_status),
+[architecture and history](docs/LCD_STATUS_PLAN.md).
 
 ---
 

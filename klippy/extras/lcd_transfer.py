@@ -191,11 +191,11 @@ def _pack(flags, encoded, width=0, height=0, raw=b''):
             'data': data}
 
 
-def prepare_idle():
+def prepare_idle(indicator='Idle'):
     # Same bounded transport; the MCU draws the logo and chooses idle layout.
     # Unused slots stay nonempty to retain the receiver's text validation.
     texts = ('Klipper', 'Ender 3 V3 SE', 'github.com/navaismo/klipper',
-             '--', 'Idle', '--', '--', '--', '--')
+             '--', indicator, '--', '--', '--', '--')
     limits = (12, 20, 27, 2, 20, 2, 2, 2, 2)
     encoded = [_text_bytes(text, limit)
                for text, limit in zip(texts, limits)]

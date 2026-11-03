@@ -104,6 +104,20 @@ For requested commits, follow `docs/CONTRIBUTING.md`: use a short
 # Project guidance: Klipper fork for Ender-3 V3 SE
 
 ## Repository and environment
+- The owner confirmed the current finished LCD appearance and supplied
+  `Screenshots/IdleV7.jpg`, `Menu1.jpg`, `Menu2.jpg`, `PrintPage1.jpg` and
+  `PrintPage2.jpg`. Use these five current hardware photos in the README;
+  keep earlier photos as historical references. Installation, commands,
+  dependencies, MCU capability checks and rollback live in
+  `docs/TJC_LCD_Setup.md`, with `config/sample-tjc-lcd.cfg` for all three
+  sections. Do not duplicate `[tjc_menu]` by including both samples.
+- The read-only SSHFS mount `/home/shaka/KlipperRemoteConfig` exposes
+  `/home/shaka/klipper-dev-data`, including `config/printer.cfg` and
+  `logs/klippy.log`. Prefer these available files over asking the owner
+  to paste logs or configuration. On 2026-11-02 the log confirmed Klippy
+  runs `/home/shaka/klipper-dev/klippy/klippy.py` using this development
+  data directory. Do not confuse the inspected build artifact with the
+  connected MCU firmware; use the latest `Loaded MCU` and constants.
 - This repository is a fork of upstream Klipper. Preserve an easy update/merge path from Klipper3d/klipper.
 - The stable installation is `/home/shaka/klipper` on a Raspberry Pi 3B+. The development checkout is `/home/shaka/klipper-dev`.
 - Developer uses VS Code on Fedora with SSHFS (`~/KlipperRemote`), rather than VS Code Server on the Raspberry Pi, because the Pi has only ~1 GB RAM and Remote-SSH caused severe swap thrashing.
@@ -111,8 +125,57 @@ For requested commits, follow `docs/CONTRIBUTING.md`: use a short
 - Read `docs/LCD_STATUS_PLAN.md` before any LCD-related work.
 
 ## Engineering rules
+- Owner exception (2026-11-02): during an active print, a new debounced
+  knob press must run the configured `PAUSE` command exactly once through
+  the host G-code path, honoring macro overrides. This is the only allowed
+  printing-time UI action. Never open a menu, redraw, send LCD traffic,
+  resume, or trigger heaters/motion directly from that input. Reject old
+  job/preflight events and recheck state under the G-code mutex. Paused
+  presses do nothing; resume remains in the host UI. This supersedes older
+  notes excluding every printing-time input, not the static-card rule.
+- The new host-owned print card follows `Screenshots/newPrint_card.png`,
+  with `Press Knob to Pause` replacing its Ender-3 footer. Use the existing
+  generic drawing capability without reflashing. Keep idle branding and
+  the firmware/date footer intact. The owner subsequently requested a larger
+  thumbnail and smaller temperature panel: scale prepared 96x96 rectangle
+  edges to 120x120 at x10/y54, without another image conversion or palette
+  change. The card header reads PRINTING in orange (0xfc00).
+  Keep temperature values compact and the nozzle's fins/block/tip recognizable.
+  All batches complete before print G-code starts;
+  printing and pause/resume preserve the finished card with no refresh.
+- The main menu footer reads `Press&Hold Knob: Idle Screen`, centered at
+  y292 in the existing panel font. Keep this wording in host assets.
+- Fast knob navigation must have bounded work: keep only one pending
+  selection redraw with a 200 ms cooldown after the previous draw finishes.
+  Discard rotations during drawing/actions and claim busy before waiting
+  for the G-code mutex. Never replay a backlog of detents. Action, printing
+  pause and filament cancel clicks bypass the navigation cooldown.
+- An explicit idle `LCD_RENDER` must allow testing after a prior LCD error:
+  request bounded LCD handshake/clear recovery and draw only after readiness
+  is confirmed. Suppress an automatic idle redraw during this recovery.
+  Do not restart Klipper/MCU or change heaters/motion. Automatic print
+  preparation must still reject an LCD error. Report acknowledgement token,
+  expected offset/state and last received reply for diagnosis; never treat
+  a timeout as success.
+- Owner decision (2026-11-02), mandatory for all future LCD/UI work: all screen designs, layouts, coordinates, colors, fonts, labels, icons, artwork, and menu definitions must live on the host, not in printer MCU firmware. Visual changes must be deployable through host files without reflashing the MCU. This takes precedence over historical notes below describing the existing C-owned layouts.
+- Keep the MCU LCD implementation minimal: USART ownership, handshake, framing, validation, bounded generic drawing operations, pacing, and completion reporting. Host Python prepares semantic drawing operations and owns menu navigation and printer actions; it must not open an LCD serial port or replace the C transport with a raw UART bridge.
+- Avoid consuming MCU flash/RAM with screen-specific assets, layout tables, menu trees, or a framebuffer. Stream bounded operations prepared by the host. Change MCU firmware only when an essential generic capability is missing, explain that necessity, and preserve the ability to make subsequent design changes entirely on the host.
+- The owner requested an idle-only knob menu based on `Screenshots/Klipper_Menus.png`. Opening requires the existing idle screen and knob rotation; printing, paused jobs, and pre-print preparation exclude interaction. Source-confirmed Marlin encoder pins are PA11/PA12, click PB1, with pull-ups and four transitions per detent. The owner accepted filament sequences at 240 C: load 50 mm at F800 then 40 mm at F400; unload by purging 15 mm at F400 then retracting 90 mm at F800. Feedrates are mm/min. Turn off the extruder heater after completion. The owner approved the host-owned architecture on 2026-11-02. The optional `[tjc_menu]` module and host designs in `tjc_menu_layout.py` use a generic C executor advertising `TJC_DRAW_VERSION=1`, keeping existing v5 idle/card rendering compatible. Enabling the menu initially needs matching updated firmware; later menu design changes are host-only. No deployment or live printer actions are authorized by this development request.
 - Keep changes modular, preferably in `klippy/extras/` or a separate integration when possible. Avoid modifying Klipper core unless architecture analysis proves it necessary.
+- Owner clarification (2026-11-02): rotating the knob in either direction opens the menu from the visible idle screen without executing an action. Once inside, clockwise moves the highlight down to the next entry and counterclockwise moves it up to the previous entry. A knob click enters the highlighted submenu or executes its action; a click while idle does not open the menu.
+- Owner requested `Screenshots/load_unload.png` for the host-owned Load/Unload screen, with current nozzle temperature and `Press to cancel`. Only these idle filament operations may refresh changed temperature values, at most once per second; printing/paused job cards remain static. A debounced knob press cancels heating or extrusion, drains only the already queued segment of at most 1 mm, sets the nozzle target to zero, restores G-code state, and returns to the main menu. Do not queue the full filament sequence ahead of cancellation. Draw the artwork before heating; input callbacks only request cancellation and never acquire G-code/LCD ownership. No MCU change is needed beyond the existing generic drawing capability.
 - Do not assume Klipper's generic `[display]` driver supports the stock Creality/TJC display.
+- Owner refinement (2026-11-02): successful Home, Preheat and Movement
+  actions must leave the menu and highlight visible with no LCD traffic.
+  Do not add a Homing/wait screen. Redraw only when navigation changes a
+  selection/page, a filament screen needs restoring, or an error is shown.
+  Owner corrected the branding request with a reference photo: the logo
+  retains orange faces and blue wings; only K is red (`0xf920`) and
+  `lipper` is white. This supersedes the earlier all-red request and applies
+  to Menu, Movement and Load/Unload. Page transitions preserve the header.
+  Reduce
+  drawing operations on the host; do not change MCU pacing or add assets
+  to firmware for visual/performance refinements.
 - Confirmed by the owner: the LCD stays connected to the printer mainboard over USART. It is not connected to the Raspberry Pi or exposed as a host serial device.
 - Implement the LCD driver in C on the mainboard MCU: USART2, handshake, framing, clear, text, and drawing/render operations. Host Python may obtain metadata and prepare image payloads, but does not directly open or control an LCD serial port. Do not replace this agreed design with a Python serial driver or a raw UART bridge without a new user decision.
 - Use `/home/shaka/Projects/Marlin/Marlin_bugfix_2.1_E3V3SE/Marlin/src/lcd/dwin/creality/dwin_lcd.cpp` and its dependencies as the primary protocol, initialization, and UART reference. Use `Marlin/src/e3v3se/ThumbRender.cpp` and `DWIN_OptimizationReference/` in that repository for rendering optimizations. Python serial tools there are historical references, not the deployed connection or intended driver.
@@ -145,8 +208,24 @@ For requested commits, follow `docs/CONTRIBUTING.md`: use a short
 
 - Cancellation macros can call SDCARD_RESET_FILE after CANCEL_PRINT_BASE or reset the SD file without the base command. A reset that leaves a ready LCD showing a job card must queue a fresh idle render, replacing any invalidated callback. Keep the G-code mutex and toolhead.wait_moves() before drawing; a new print still invalidates that callback. No LCD traffic may occur while printing/paused. Metadata labels begin at x126, leaving an eight-pixel gap after the icons; height units are attached to the value (e.g. 0.18mm).
 
+- Every idle render must retain firmware identification. Read the actual
+  connected LCD MCU's `mcu_version`, never the host checkout's Git version.
+  The host composes a small centered 5x7 `FW:` footer below Idle at y309,
+  including the compilation date (`YYYY-MM-DD`) parsed from that MCU's
+  build identifier. Preserve the Idle position and existing artwork.
+  All font glyphs and their rectangles live on the host; no reflash.
+  An unavailable build date shows `--`. Generic drawing is used;
+  legacy v5 uses the existing indicator text slot. Preserve this on
+  startup and every return from printing or menus without reflashing for
+  layout changes.
+
+- The owner physically confirmed the Y movement labels were reversed.
+  `Move Y Front` must issue Y +10 mm and `Move Y Back` Y -10 mm. Keep the
+  normal homing, full-destination travel checks and feedrate unchanged;
+  do not invert the machine's configured motor direction to fix menu labels.
+
 ## Work priorities
-1. Read-only LCD print-status display (current focus).
+1. Static LCD print-status display and the requested host-designed idle-only knob menu (current focus).
 2. HX711/load-cell automated multi-point Z-offset (future project; not in current scope).
 3. Power-loss recovery, PLR (future project; not in current scope).
 

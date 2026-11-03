@@ -44,6 +44,17 @@ This is separate from **klippy/extras/lcd_status.py**, which prepares
 metadata and pixels, then delegates rendering before the first file G-code.
 **src/tjc_job.c** incrementally validates the payload and renders text and
 RGB565 spans using two rows of runs, avoiding a full MCU framebuffer.
+That v5 path remains in use for idle artwork and as a legacy-card fallback.
+With generic drawing firmware, **lcd_job_layout.py** owns the current
+print-card composition, and **tjc_menu_layout.py** owns menu/filament
+artwork. **lcd_idle_layout.py** owns the small firmware/date footer.
+**lcd_draw.py** validates and compacts host operations; **src/tjc_draw.c**
+is the bounded generic C executor, with no menu or print-card design assets.
+**tjc_menu.py** registers the stock encoder/buttons through the existing
+button module, coalesces navigation with a 200 ms redraw cooldown, and
+serializes idle printer actions with G-code. Its only printing-time action
+is the configured `PAUSE` command; it sends no LCD traffic during printing.
+See the [setup guide](TJC_LCD_Setup.md) and [LCD plan](LCD_STATUS_PLAN.md).
 
 During compilation, the build may create an **out/** directory. This
 contains temporary build time objects. The final micro-controller

@@ -8,6 +8,20 @@ All dates in this document are approximate.
 
 ## Changes
 
+20261102 (fork LCD): The full host-designed LCD setup and optional
+`[tjc_menu]` require connected MCU firmware advertising `TJC_DRAW_VERSION=1`
+alongside `TJC_LCD_VERSION=1` and `TJC_JOB_VERSION=5`. Keep
+`CONFIG_TJC_LCD=y`, GPIO button support, the working bootloader/clock and
+USART1 host connection. Older v5 firmware retains its legacy card but
+cannot enable the knob module. Once these capabilities are installed,
+new layouts and controls are host updates, without another flash. The
+current card displays a 120x120 thumbnail from the prepared 96x96 image;
+status preparation dimensions and the legacy v5 descriptor are unchanged.
+Add `[tjc_menu]` to enable knob navigation and printing-time `PAUSE`;
+it is not enabled by compiling alone. The standard pause support loads
+automatically and existing macro overrides remain in effect. See the
+[setup guide](TJC_LCD_Setup.md) for configuration, migration and recovery.
+
 20261022 (fork LCD): The job/idle layouts use payload v5 and require
 matching host extras and MCU firmware advertising `TJC_JOB_VERSION=5`.
 Previously exported v1/v2/v3/v4 binary jobs must be regenerated. Keep the

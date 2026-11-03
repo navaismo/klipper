@@ -133,6 +133,11 @@ communicate with the LCD:
   and `chunk_count`. Payload bytes are excluded. This is a prepared
   application format; the descriptor alone does not indicate a completed
   transfer. Check `tjc_lcd.rendered` for the last render result.
+  With generic drawing firmware, this descriptor remains the legacy
+  diagnostic representation; the host-owned card uses drawing operations
+  instead. Its model area scales the prepared 96x96 image to 120x120 with
+  the same colors. These status image dimensions and transfer byte counts describe preparation,
+  not the generic card's panel dimensions or on-wire drawing size.
 - `job.transfer.image`: Null without a thumbnail; otherwise `encoding`
   (`rects565` or `rgb565be`), encoded `size` including its codec byte,
   `raw_size` (18432), rectangle count and nonblack color count. For raw
@@ -164,13 +169,50 @@ The fork-specific [tjc_lcd](Config_Reference.md#tjc_lcd) object provides:
   and its trailing handshake/settling checkpoint. False after startup,
   clear, a new render, or disconnect. This is not a pixel-level panel ACK.
 - `job_filename`: Filename of that successfully rendered job, otherwise null.
-- `screen`: `blank`, `job`, `idle`, or null while rendering, on error or
+- `screen`: `blank`, `job`, `idle`, `menu`, or null while rendering, on error or
   disconnected. `rendered` is specific to a job card; an idle screen sets
   `rendered` to False and `job_filename` to null.
 
 Status reads do not issue MCU commands or LCD traffic. A disconnect or
 shutdown sets `disconnected`. Starting a print waits for a pending LCD
 operation and requires `ready`; pause/resume does not repeat initialization.
+An explicit idle `LCD_RENDER` can recover a prior error with bounded
+handshake/clear before drawing; automatic print preparation retains the
+error gate. `LCD_PREPARE` succeeding does not establish LCD readiness.
+
+## tjc_menu
+
+The optional fork-specific [tjc_menu](Config_Reference.md#tjc_menu) object
+provides:
+
+- `active`: True while the menu owns the screen, including its actions.
+- `page`: `main`, `move`, or null when closed.
+- `selected`: The selected entry's label, or null when closed.
+- `busy`: True during a menu drawing or menu action. Navigation is discarded;
+  a stable knob press can still cancel an active filament operation.
+- `error`: The latest menu/action error, or null. A click dismisses a
+  displayed error without repeating the failed action.
+  Printing-time PAUSE errors are reported here and in the console without
+  drawing an error screen.
+- `filament_action`: `load` or `unload` during the filament operation,
+  otherwise null.
+- `cancel_requested`: True between an accepted filament cancel press and
+  completion of cleanup; False otherwise.
+
+During printing the menu is inactive. A new debounced press can run
+`PAUSE`; this does not change `screen: job` or redraw the static card.
+Paused clicks do not resume. Status reads remain passive.
+Navigation keeps one pending latest-selection redraw with a 200 ms
+cooldown after completion. `selected` can describe the pending selection
+before it becomes visible; it does not acknowledge a panel redraw.
+
+Reading status performs no LCD traffic or printer actions. A menu closes
+on pre-print preparation, LCD reinitialization/clear/idle, file reset,
+shutdown, or disconnect. Only active idle Load/Unload screens refresh
+changed nozzle temperature values, at most once per second. These
+updates stop with the operation and never run during printing or pause.
+See the [setup guide](TJC_LCD_Setup.md#lcd-commands-and-status) and
+[API query example](API_Server.md#objectsquery) for diagnostics.
 
 ## endstop_phase
 
