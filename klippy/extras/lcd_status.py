@@ -310,7 +310,7 @@ class LCDStatus:
         self.state = 'empty'
         self.error = None
 
-    def _handle_before_print(self, filename):
+    def _handle_before_print(self, filename, manual=False):
         logging.info("LCD preparing static job data: %s", filename)
         try:
             job = self.prepare_job(filename)
@@ -318,8 +318,14 @@ class LCDStatus:
                 logging.warning('LCD job warning (%s): %s', filename, warning)
             display = self.printer.lookup_object('tjc_lcd', None)
             if display is not None:
-                display.render_job(job)
+                if manual:
+                    display.render_job(job, recover=True)
+                else:
+                    display.render_job(job)
         except Exception as e:
+            if manual:
+                logging.exception('LCD manual render failed')
+                raise self.gcode.error('LCD_RENDER failed: %s' % (e,))
             logging.exception("LCD pre-print preparation failed")
             raise self.gcode.error("LCD preparation failed before print: %s"
                                    % (e,))
@@ -330,13 +336,13 @@ class LCDStatus:
     def cmd_LCD_RENDER(self, gcmd):
         if self.printer.lookup_object('tjc_lcd', None) is None:
             raise gcmd.error('LCD_RENDER requires [tjc_lcd]')
-        job = self._handle_before_print(gcmd.get('FILENAME'))
+        job = self._handle_before_print(gcmd.get('FILENAME'), manual=True)
         if job['thumbnail'] is None:
             gcmd.respond_info('LCD job card rendered'
                               ' (text only; thumbnail unavailable)')
         else:
             gcmd.respond_info('LCD job card rendered'
-                              ' (96x96 thumbnail included)')
+                              ' (prepared thumbnail included)')
         for warning in job['warnings']:
             gcmd.respond_info('LCD warning: %s' % (warning,))
 

@@ -8,6 +8,7 @@ from . import hx71x
 from . import ads1220
 from . import cs1237
 from . import ads131m0x
+from . import load_cell_guided
 from .bulk_sensor import BatchWebhooksClient
 import collections, itertools
 # We want either Python 3's zip() or Python 2's izip() but NOT 2's zip():
@@ -92,6 +93,12 @@ class LoadCellCommandHelper:
 
     cmd_CALIBRATE_LOAD_CELL_help = "Start interactive calibration tool"
     def cmd_LOAD_CELL_CALIBRATE(self, gcmd):
+        mode = gcmd.get('MODE', None)
+        if mode is not None:
+            if mode.upper() != 'DIAGNOSTIC':
+                raise gcmd.error('Only MODE=DIAGNOSTIC is supported')
+            load_cell_guided.start(self.printer, self.load_cell, gcmd)
+            return
         LoadCellGuidedCalibrationHelper(self.printer, self.load_cell)
 
     cmd_LOAD_CELL_READ_help = "Take a reading from the load cell"

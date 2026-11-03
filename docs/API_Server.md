@@ -208,6 +208,25 @@ timestamp from when the query was taken.
 Available fields are documented in the
 [Status Reference](Status_Reference.md) document.
 
+This fork also exposes `lcd_status`, `tjc_lcd` and, if configured,
+`tjc_menu` through this existing endpoint. For example:
+
+```json
+{"id": 124, "method": "objects/query", "params": {"objects": {
+  "lcd_status": null,
+  "tjc_lcd": ["state", "error", "screen", "rendered", "job_filename"],
+  "tjc_menu": ["active", "page", "selected", "busy", "error"]
+}}}
+```
+
+Omit `tjc_menu` when it is not configured. These queries are passive: they
+do not collect new metadata, redraw the LCD or operate the printer.
+`lcd_status.state: prepared` describes host preparation; inspect
+`tjc_lcd.rendered` for job transfer/checkpoint completion. See the
+[LCD status fields](Status_Reference.md#lcd_status) and
+[setup guide](TJC_LCD_Setup.md). Existing `gcode/script` handles LCD commands;
+there is no separate LCD endpoint.
+
 ### objects/subscribe
 
 This endpoint allows one to query and then subscribe to information

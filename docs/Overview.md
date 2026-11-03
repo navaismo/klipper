@@ -18,6 +18,8 @@ communication with the Klipper developers.
 
 - [Installation](Installation.md): Guide to installing Klipper.
   - [Octoprint](OctoPrint.md): Guide to installing Octoprint with Klipper.
+- [Ender-3 V3 SE TJC LCD setup](TJC_LCD_Setup.md): This fork's LCD firmware,
+  host configuration, knob menus, filament controls and static print card.
 - [Config Reference](Config_Reference.md): Description of config
   parameters.
   - [Rotation Distance](Rotation_Distance.md): Calculating the
@@ -66,8 +68,8 @@ communication with the Klipper developers.
   isolated updates from upstream.
 - [Code overview](Code_Overview.md): Developers should read this
   first.
-- [LCD status project](LCD_STATUS_PLAN.md): Fork-specific static LCD
-  architecture and host data preparation for the Ender-3 V3 SE.
+- [LCD status project](LCD_STATUS_PLAN.md): Fork-specific LCD architecture,
+  host-designed menus, print-card lifecycle and validation history.
 - [Automatic Z-offset project](AUTO_Z_OFFSET_PLAN.md): Standalone load-cell
   calibration of CR Touch offset, staged setup and measurement validation.
 - [Kinematics](Kinematics.md): Technical details on how Klipper

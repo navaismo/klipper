@@ -91,6 +91,7 @@ nav:
     - Installation:
       - Installation.md
       - OctoPrint.md
+    - TJC_LCD_Setup.md
     - Configuration Reference:
       - Config_Reference.md
       - Rotation_Distance.md

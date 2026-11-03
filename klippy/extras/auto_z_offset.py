@@ -6,7 +6,9 @@ import json
 import logging
 import math
 import uuid
-from . import load_cell_diagnostics, load_cell_probe, manual_probe
+from . import load_cell_contact, load_cell_contact_onset
+from . import load_cell_diagnostics, load_cell_probe
+from . import manual_probe
 
 
 class AutoZOffset:
@@ -34,6 +36,16 @@ class AutoZOffset:
         self.clearance = config.getfloat('horizontal_move_z', 5., above=0.)
         self.travel_speed = config.getfloat('travel_speed', 50., above=0.)
         self.z_hop_speed = config.getfloat('z_hop_speed', 5., above=0.)
+        # Consume retired DEV options so existing configurations still load.
+        # They impose no requirements and never select a movement endpoint.
+        for option in ('test_minimum_z', 'test_max_descent',
+                       'test_probe_minimum_z', 'test_probe_max_descent',
+                       'test_probe_deploy_minimum_z', 'test_position_minimum_z',
+                       'test_position_max_descent'):
+            config.get(option, None)
+        self.cold_max_temp = config.getfloat('cold_test_max_temperature', 35.,
+                                            above=0., maxval=40.)
+        self._cold_contact = False
         # Require explicit contact speeds and locally validated force limits.
         speed = config.getfloat('speed', above=0.)
         lift = config.getfloat('lift_speed', above=0.)
@@ -63,6 +75,7 @@ class AutoZOffset:
             self.stable_time, self.recovery_time, self.heating_timeout,
             self.tolerance, self.spatial_tolerance,
             self.min_offset, self.max_offset]
+        values.append(self.cold_max_temp)
         if not all(self._finite(v) for v in values):
             raise config.error("Auto Z-offset parameters must be finite")
         self.tap = load_cell_probe.LoadCellTapHelper(
@@ -200,7 +213,9 @@ class AutoZOffset:
         self.contact_verified = False
         self.verified_points.clear()
         if not self.busy and self.state in ('candidate', 'accepted',
-                                            'contact_ready', 'rejected'):
+                                            'contact_ready', 'rejected',
+                                            'diagnostic_complete',
+                                            'diagnostic_rejected'):
             self.state = 'idle'
 
     def _fingerprint(self):
@@ -222,6 +237,11 @@ class AutoZOffset:
                 or (sd is not None and (sd.is_active()
                     or getattr(sd, 'preflight_pending', False)))):
             raise self.gcode.error("Auto Z-offset requires an idle printer")
+        diagnostic = self.printer.lookup_object('load_cell_diagnostic', None)
+        if (diagnostic is not None
+                and diagnostic.get_status(now)['session_id'] is not None):
+            raise self.gcode.error("Finish or ABORT load cell diagnostics "
+                                   "before Auto Z-offset")
         manual_probe.verify_no_manual_probe(self.printer)
 
     def _check_pending(self):
@@ -283,6 +303,10 @@ class AutoZOffset:
         return self._thermal_error(targets) is None
 
     def _check_thermal(self, targets):
+        if self._cold_contact:
+            self._check_idle()
+            self._check_cold()
+            return
         deadline = self.reactor.monotonic() + self.recovery_time
         waiting = False
         while True:
@@ -310,6 +334,11 @@ class AutoZOffset:
             self.reactor.pause(min(now + 0.25, deadline))
 
     def _heat(self, targets):
+        if self._cold_contact:
+            self._check_cold()
+            self.gcode.respond_info(
+                "Cold supervised contact; heaters unchanged")
+            return
         for heater, target, minimum in targets:
             self.heaters.set_temperature(heater, target, wait=False)
         self.state = 'heating'
@@ -345,8 +374,22 @@ class AutoZOffset:
                 raise self.gcode.error("Auto Z-offset heating timed out")
             self.reactor.pause(now + 0.25)
 
+    def _check_cold(self):
+        for heater in (self.bed, self.nozzle):
+            actual, target = heater.get_temp(self.reactor.monotonic())
+            if (not self._finite(actual) or not self._finite(target)
+                    or target != 0. or actual < heater.min_temp
+                    or actual > self.cold_max_temp):
+                raise self.gcode.error(
+                    "Cold contact requires heaters off and valid readings "
+                    "at or below %.1f C" % self.cold_max_temp)
+
     def _raise_z(self):
-        if self.toolhead.get_position()[2] < self.clearance:
+        status = self.toolhead.get_status(self.reactor.monotonic())
+        z = self.toolhead.get_position()[2]
+        if 'z' not in status['homed_axes'] or not self._finite(z):
+            raise self.gcode.error("Cannot retract without a valid homed Z")
+        if z < self.clearance:
             self.toolhead.manual_move([None, None, self.clearance],
                                       self.z_hop_speed)
 
@@ -380,7 +423,7 @@ class AutoZOffset:
         return not (math.isnan(value) or math.isinf(value))
 
     def _measure_pair(self, gcmd, tap_gcmd, targets, point_index, sample_index,
-                      fingerprint, lcd=None):
+                      fingerprint, lcd=None, diagnostic_only=False):
         point = self.points[point_index]
         self._frame_event('pair_begin', point_index=point_index + 1,
                           sample_index=sample_index + 1,
@@ -393,6 +436,9 @@ class AutoZOffset:
         self._frame_event('before_cr')
         cr = self._probe()
         self._frame_event('after_cr', cr=cr)
+        floor, distance = self._nozzle_bounds(cr, tap_gcmd)
+        self._frame_event('nozzle_bounds', cr=cr, minimum_z=floor,
+                          maximum_descent=distance)
         self._check_thermal(targets)
         self._frame_event('before_nozzle_xy', cr=cr)
         self._position(point)
@@ -408,7 +454,8 @@ class AutoZOffset:
         before = self._temperatures()
         self._frame_event('before_tap', cr=cr)
         try:
-            pos, valid = self.tap.tapping_move.run_tap(tap_gcmd)
+            pos, valid = self.tap.tapping_move.run_tap(
+                tap_gcmd, minimum_z=floor, maximum_descent=distance)
         except Exception as exc:
             self._frame_event('tap_failed', cr=cr, error=exc)
             raise
@@ -427,20 +474,108 @@ class AutoZOffset:
         if not self._finite(offset) or not \
                 self.min_offset <= offset <= self.max_offset:
             raise gcmd.error("Measured Z-offset outside valid range")
+        diagnostic = self.tap.tapping_move.get_contact_diagnostics()
+        qualification = load_cell_contact.qualify_contact(
+            diagnostic, pos[2], self.tolerance)
+        sensitivity = diagnostic.get('window_sensitivity') \
+            if isinstance(diagnostic, dict) else None
+        qualified = qualification['eligible_for_candidate']
         self._frame_event('pair_result', cr=cr, pos=pos,
-                          trigger_z=trigger_z, offset=offset)
+                          trigger_z=trigger_z, offset=offset,
+                          contact_qualification=qualification,
+                          window_sensitivity=sensitivity,
+                          diagnostic_only=diagnostic_only)
         self.last_contact = {
             'point_index': point_index + 1, 'sample_index': sample_index + 1,
             'point': list(point), 'cr_trigger_z': cr.test_z,
             'force_trigger_z': trigger_z, 'regression_z': pos[2],
-            'regression_delta': pos[2] - trigger_z, 'offset': offset,
+            'regression_delta': pos[2] - trigger_z,
+            'offset': offset if qualified and not diagnostic_only else None,
+            'model_offset': offset,
+            'contact_qualification': qualification,
+            'window_sensitivity': sensitivity,
             'saved_offset': fingerprint[0][2], 'mesh_active': False,
+            'contact_bounds': {'minimum_z': floor,
+                               'maximum_descent': distance,
+                               'surface_reference_z': cr.bed_z},
             'temperatures_before': before, 'temperatures_after': after}
+        if diagnostic_only:
+            branches = diagnostic if isinstance(diagnostic, dict) else {}
+            self.last_contact.update({
+                'diagnostic_only': True, 'eligible_for_application': False,
+                'descent_fit_z': branches.get('descent_fit_z'),
+                'ascent_fit_z': branches.get('ascent_fit_z'),
+                'descent_status': branches.get('descent', {}).get(
+                    'status', 'unavailable'),
+                'ascent_status': branches.get('ascent', {}).get(
+                    'status', 'unavailable'),
+                'primary_fit_z': pos[2], 'observational_offset': offset})
+            try:
+                onset = load_cell_contact_onset.estimate(diagnostic)
+            except Exception:
+                load_cell_diagnostics.warn('contact onset estimation')
+                onset = {'status': 'unresolved', 'z': None,
+                    'diagnostic_only': True, 'eligible_for_application': False,
+                    'reasons': ['estimator_error']}
+            onset_z = onset['z']
+            onset['observational_offset'] = (cr.test_z - onset_z
+                if onset_z is not None else None)
+            ascent_z = branches.get('ascent_fit_z')
+            onset['withdrawal_minus_onset_mm'] = (ascent_z - onset_z
+                if ascent_z is not None and onset_z is not None else None)
+            self.last_contact['contact_onset'] = onset
         gcmd.respond_info(
             "Contact at X%.3f Y%.3f: force_trigger_z=%.6f mm, "
             "regression_z=%.6f mm, difference=%.6f mm"
             % (point[0], point[1], trigger_z, pos[2], pos[2] - trigger_z))
         logging.info("Auto Z-offset contact: %s", self.last_contact)
+        if sensitivity is not None:
+            try:
+                spans = [load_cell_diagnostics.number(
+                    sensitivity[b]['max_z_variation_mm'])
+                    for b in ('descent', 'ascent')]
+                text = ['%.6f' % v if v is not None else 'unavailable'
+                        for v in spans]
+                gcmd.respond_info("Fit window sensitivity: descent=%s mm, "
+                    "ascent=%s mm; branch=%s; physical bias unknown "
+                    "(diagnostic only)"
+                    % (text[0], text[1], qualification['status']))
+            except Exception:
+                load_cell_diagnostics.warn('window sensitivity response')
+        if diagnostic_only:
+            descent, ascent = [self.last_contact[k] for k in
+                               ('descent_fit_z', 'ascent_fit_z')]
+            fitted = ['%.6f' % z if z is not None else 'unavailable'
+                      for z in (descent, ascent)]
+            gcmd.respond_info(
+                "Auto Z-offset diagnostic P1: cr_test_z=%.6f mm, "
+                "descent_fit_z=%s mm, "
+                "ascent_fit_z=%s mm, primary_fit_z=%.6f mm, "
+                "observational_offset=%.6f mm; "
+                "descent_status=%s; ascent_status=%s; "
+                "legacy_branch_verdict=%s; branch_difference=%s mm; "
+                "reasons=%s; "
+                "no candidate, no apply or save"
+                % (cr.test_z, fitted[0], fitted[1], pos[2], offset,
+                   self.last_contact['descent_status'],
+                   self.last_contact['ascent_status'], qualification['status'],
+                   qualification['branch_disagreement_mm'],
+                   ', '.join(qualification['reasons']) or 'none'))
+            gcmd.respond_info(
+                "Descent contact onset: %s; z=%s mm; offset=%s mm; "
+                "interval=%s mm; reasons=%s; withdrawal diagnostic only; "
+                "no candidate, no apply or save"
+                % (onset['status'], onset['z'], onset['observational_offset'],
+                   onset.get('interval_z_mm'),
+                   ', '.join(onset['reasons']) or 'none'))
+            # Only model rejection is observational. Safety errors above still
+            # propagate, and the original tap/retraction has already finished.
+            return offset
+        if not qualified:
+            raise gcmd.error("Unreliable contact model: %s; "
+                "branch difference=%s mm, allowed span=%.6f mm; no candidate"
+                % (', '.join(qualification['reasons']),
+                   qualification['branch_disagreement_mm'], self.tolerance))
         logging.info(
             "Auto Z-offset point %d pair %d: saved=%.6f cr_trigger_z=%.6f "
             "cr_bed_z=%.6f nozzle_contact_z=%.6f offset=%.6f",
@@ -491,16 +626,35 @@ class AutoZOffset:
             "Inspect the result; confirm with AUTO_Z_OFFSET_ACCEPT."
             % (self.result['z_offset'], self.result['range'], spread))
 
-    def _run(self, gcmd, contact_only, automatic=False):
+    def _run(self, gcmd, contact_only, automatic=False, diagnostic=False):
         if self.busy:
             raise gcmd.error("Auto Z-offset is already running")
         self.stage = 'preflight'
         try:
-            self._execute_run(gcmd, contact_only, automatic)
+            self._execute_run(gcmd, contact_only, automatic, diagnostic)
         except Exception as exc:
             self.state = 'error'
             self.error = "Auto Z-offset %s failed: %s" % (self.stage, exc)
             raise gcmd.error(self.error)
+        finally:
+            self._cold_contact = False
+
+    def _nozzle_bounds(self, cr, tap_gcmd):
+        # Use the fresh native probe surface reference in this coordinate
+        # frame. The existing tap retract distance also bounds overtravel.
+        retract = self.tap.param_helper.get_probe_params(tap_gcmd)[
+            'load_cell_retract_dist']
+        surface = cr.bed_z
+        floor = surface - retract
+        low = self.toolhead.get_status(self.reactor.monotonic())[
+            'axis_minimum'][2]
+        distance = self.clearance - floor
+        if (not all(self._finite(v) for v in
+                    (surface, retract, floor, low, distance))
+                or retract <= 0. or distance <= 0. or floor <= low):
+            raise self.gcode.error(
+                "Invalid CR Touch-relative nozzle bound; no descent")
+        return floor, distance
 
     def _measure_points(self, gcmd, tap_gcmd, targets, indices, supervised,
                         fingerprint, lcd):
@@ -531,7 +685,8 @@ class AutoZOffset:
             if fingerprint != self._fingerprint():
                 raise gcmd.error("Calibration references changed")
             if supervised:
-                self.verified_points[index] = fingerprint
+                if not self._cold_contact:
+                    self.verified_points[index] = fingerprint
             else:
                 gcmd.respond_info(
                     "Point %d X%.3f Y%.3f: median %.6f mm, range %.6f mm"
@@ -544,10 +699,15 @@ class AutoZOffset:
             # A bounded update and final fence finish before any acquisition.
             lcd.update_calibration(phase, self.stage)
 
-    def _execute_run(self, gcmd, contact_only, automatic):
+    def _execute_run(self, gcmd, contact_only, automatic, diagnostic=False):
         self.tap.probing_move.clear_safety_reference()
         self.candidate = self.result = self.error = None
         self.last_contact = None
+        if diagnostic:
+            self.verified_points.clear()
+            self.contact_verified = False
+            if not contact_only or automatic:
+                raise gcmd.error("Diagnostic execution requires bounded P1")
         self.state = 'idle' if self.connected else 'disconnected'
         self._check_idle()
         self._check_pending()
@@ -562,25 +722,36 @@ class AutoZOffset:
         point_index = gcmd.get_int('POINT', 1, minval=1,
                                    maxval=len(self.points)) - 1 \
             if contact_only else None
+        if diagnostic and point_index != 0:
+            raise gcmd.error("DIAGNOSTIC=1 only supports POINT=1")
+        self._cold_contact = bool(gcmd.get_int('COLD', 0, minval=0, maxval=1))
+        if self._cold_contact:
+            if (not contact_only or point_index != 0
+                    or any(k in gcmd.get_command_parameters()
+                           for k in ('BED_TEMP', 'NOZZLE_TEMP'))):
+                raise gcmd.error("COLD=1 is only for TEST_CONTACT POINT=1 "
+                                 "without temperature parameters")
+            self.verified_points.clear()
+            self.contact_verified = False
+            self._check_cold()
         fingerprint = self._fingerprint()
         self.verified_points = {
             i: ref for i, ref in self.verified_points.items()
             if ref == fingerprint}
         self.contact_verified = (
             len(self.verified_points) == len(self.points))
-        if not contact_only and not automatic and not self.contact_verified:
-            raise gcmd.error(
-                "Run AUTO_Z_OFFSET_TEST_CONTACT POINT=n successfully "
-                "for every configured point first")
         targets = [(self.bed, gcmd.get_float('BED_TEMP', self.bed_temp,
                     minval=50., maxval=self.bed.max_temp), 50.),
                    (self.nozzle, gcmd.get_float('NOZZLE_TEMP', self.nozzle_temp,
                     minval=170., maxval=self.nozzle.max_temp), 170.)]
+        if self._cold_contact:
+            targets = [(self.bed, 0., 0.), (self.nozzle, 0., 0.)]
         if any(not self._finite(t) or not minimum <= t <= h.max_temp
                for h, t, minimum in targets):
             raise gcmd.error("Invalid Auto Z-offset temperature target")
         previous = [(h, h.get_temp(self.reactor.monotonic())[1])
-                    for h, target, minimum in targets]
+                    for h, target, minimum in targets] \
+            if not self._cold_contact else []
         motion_started = False
         lcd = None
         self.busy = True
@@ -591,7 +762,9 @@ class AutoZOffset:
             display = self.printer.lookup_object('tjc_lcd', None)
             if display is not None:
                 try:
-                    if display.begin_calibration('Warming up',
+                    if display.begin_calibration(
+                            'Cold contact test' if self._cold_contact
+                            else 'Warming up',
                             nozzle_target=targets[1][1],
                             bed_target=targets[0][1]):
                         lcd = display
@@ -635,22 +808,46 @@ class AutoZOffset:
                     len(self.verified_points) == len(self.points))
                 if not self.contact_verified:
                     raise gcmd.error("Supervised contact qualification failed")
-            point_results = self._measure_points(
-                gcmd, tap_gcmd, targets, point_indices, contact_only,
-                fingerprint, lcd)
-            if contact_only:
+            if diagnostic:
+                self.stage = 'Diagnostic P1 pair 1'
+                gcmd.respond_info('Auto Z-offset: ' + self.stage)
+                self._measure_pair(gcmd, tap_gcmd, targets, 0, 0,
+                                   fingerprint, lcd, diagnostic_only=True)
+                self._update_lcd(lcd, 'computing')
+                if fingerprint != self._fingerprint():
+                    raise gcmd.error("Calibration references changed")
+                onset = self.last_contact['contact_onset']
+                self.state = ('diagnostic_complete'
+                    if onset['status'] == 'identified'
+                    else 'diagnostic_rejected')
+                self.error = ', '.join(onset['reasons']) or None
+            else:
+                point_results = self._measure_points(
+                    gcmd, tap_gcmd, targets, point_indices, contact_only,
+                    fingerprint, lcd)
+            if not diagnostic and contact_only:
                 self.contact_verified = (
                     len(self.verified_points) == len(self.points))
                 self.state = 'contact_ready'
-                gcmd.respond_info("Supervised nozzle contact passed; no save")
-            else:
+                gcmd.respond_info(
+                    "Cold contact passed; no hot qualification or save"
+                    if self._cold_contact else
+                    "Supervised nozzle contact passed; no save")
+            elif not diagnostic:
                 self.stage = 'spatial validation'
                 self._update_lcd(lcd, 'computing')
                 self._report_result(gcmd, point_results, fingerprint)
-            if self.state != 'rejected':
+            if self.state not in ('rejected', 'diagnostic_rejected'):
                 self.stage = 'complete'
         except Exception as exc:
+            rejected_contact = self.last_contact
+            if (rejected_contact is not None
+                    and not rejected_contact.get('diagnostic_only', False)
+                    and rejected_contact.get('contact_qualification', {}).get(
+                        'eligible_for_candidate', True)):
+                rejected_contact = None
             self._invalidate()
+            self.last_contact = rejected_contact
             self.error = str(exc)
             self.state = 'error'
             raise
@@ -659,11 +856,6 @@ class AutoZOffset:
             cleanup_error = None
             try:
                 if self.connected and not self.printer.is_shutdown():
-                    if had_error:
-                        gcmd.respond_info(
-                            "Auto Z-offset aborted; restoring previous heater "
-                            "targets: heater_bed=%.1f C, extruder=%.1f C"
-                            % (previous[0][1], previous[1][1]))
                     if motion_started:
                         try:
                             self._raise_z()
@@ -671,6 +863,15 @@ class AutoZOffset:
                         except Exception as exc:
                             cleanup_error = exc
                             logging.exception("Auto Z-offset retract failed")
+                    if had_error and previous:
+                        try:
+                            gcmd.respond_info(
+                                "Auto Z-offset aborted; restoring previous "
+                                "heater targets: heater_bed=%.1f C, "
+                                "extruder=%.1f C"
+                                % (previous[0][1], previous[1][1]))
+                        except Exception:
+                            logging.exception("Auto Z-offset error response")
                     for heater, target in previous:
                         try:
                             self.heaters.set_temperature(heater, target,
@@ -683,8 +884,13 @@ class AutoZOffset:
                 self.busy = False
                 if lcd is not None:
                     success = (not had_error and cleanup_error is None
-                               and self.state != 'rejected')
-                    text = ('Offset %.3fmm - review' % self.result['z_offset']
+                               and self.state not in (
+                                   'rejected', 'diagnostic_rejected'))
+                    text = ('Diagnostic rejected'
+                            if self.state == 'diagnostic_rejected' else
+                            'Diagnostic - no save'
+                            if diagnostic and success else
+                            'Offset %.3fmm - review' % self.result['z_offset']
                             if success and self.result is not None else
                             'Contact passed' if success else
                             'Failed: ' + self.stage)
@@ -692,8 +898,11 @@ class AutoZOffset:
                         lcd.end_calibration(text, success)
                     except Exception as exc:
                         logging.exception('Auto Z-offset LCD finish failed')
-                        gcmd.respond_info('LCD phase screen finish failed: %s'
-                                          % (exc,))
+                        try:
+                            gcmd.respond_info(
+                                'LCD phase screen finish failed: %s' % (exc,))
+                        except Exception:
+                            logging.exception('Auto Z-offset LCD response')
             if cleanup_error is not None:
                 self._invalidate()
                 self.state = 'error'
@@ -709,13 +918,19 @@ class AutoZOffset:
         self._run(gcmd, False)
 
     def cmd_AUTO_Z_OFFSET(self, gcmd):
-        self._run(gcmd, False, automatic=True)
-        if self.state == 'rejected':
-            raise gcmd.error(self.error)
+        if not gcmd.get_int('DIAGNOSTIC', 0, minval=0, maxval=1):
+            self._run(gcmd, False, automatic=True)
+            return
+        allowed = ('DIAGNOSTIC', 'POINT', 'COLD', 'BED_TEMP', 'NOZZLE_TEMP')
+        if any(k not in allowed for k in gcmd.get_command_parameters()):
+            raise gcmd.error("Unsupported AUTO_Z_OFFSET diagnostic parameter")
+        self._run(gcmd, True, diagnostic=True)
 
     def cmd_ACCEPT(self, gcmd):
         self._check_idle()
-        if self.busy or self.candidate is None or self.result is None:
+        if (self.busy or self.candidate is None or self.result is None
+                or (self.last_contact is not None
+                    and self.last_contact.get('diagnostic_only', False))):
             raise gcmd.error("No validated Z-offset candidate to accept")
         if self.candidate != self._fingerprint():
             self._invalidate()

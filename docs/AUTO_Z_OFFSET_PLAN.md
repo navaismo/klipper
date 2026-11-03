@@ -34,6 +34,216 @@ four-point qualification below explains the move to reference/validation.
 
 ## Systematic offset investigation (2026-10-30)
 
+### Diagnostic descent contact onset (2026-11-02)
+
+DIAGNOSTIC=1 additionally fits `force = baseline + drift * time +
+compression * max(contact_z - z, 0)` to the recorded descent. Time is the
+original sample print_time, not host arrival or a substituted nominal rate.
+The baseline can drift; compression must be positive. Candidate change points
+cover the observed Z grid with local refinement. The original LCBestFit,
+MCU trigger and movement endpoints remain unchanged. Retraction is compared
+for hysteresis/relaxation but is not required to match the new diagnostic
+contact coordinate. No normal calibration/acceptance path uses the new onset.
+
+The existing 0.25/0.5/1/2-second and full-descent windows provide local models.
+A drifting baseline alone is the null model. Positive BIC improvement uses an
+observed effective sample count; initial-positive monotone autocorrelation
+sums estimate residual information separately in free/compressed regions.
+The slower decorrelation is used for the whole window, not a pool of presumed
+independent repetitions. A nominal 95% profile-likelihood convention plus
+sample spacing gives approximate conditional intervals. Too little effective
+support, absent compression evidence, open/multimodal profiles or incompatible
+supported windows leave the onset unresolved. Nested windows are never
+averaged as independent data. The shortest supported local window supplies
+an estimate only when its interval overlaps all supported-window intervals.
+The envelope retains all their variation. No printing offset or fixed
+millimeter rejection/correction constant is used.
+
+This confidence describes fitted-signal support, not independently verified
+physical contact. ADC delay, mechanical force transfer and unmodeled baseline
+curvature remain possible shared biases. Unresolved traces retain per-window
+models/reasons but have null onset Z and null onset-derived offset. Even
+identified diagnostic onsets have `eligible_for_application: False` and
+cannot be staged with ACCEPT. Legacy ascent results and branch verdicts are
+still reported separately. Diagnostic state follows the onset result only;
+normal AUTO_Z_OFFSET continues using its existing estimator/qualification.
+All original MCU, thermal, fit-error and cleanup errors still propagate.
+
+Six full original traces (three cold and the three hot runs discussed with
+the owner) are in `test/fixtures/load_cell_contact_six_20261102.json`.
+Their provenance explicitly identifies the selected acquisitions. Replay:
+
+```bash
+python3 -B scripts/replay_load_cell_contact.py --fixture test/fixtures/load_cell_contact_six_20261102.json
+PYTHONPATH=test/unit python3 -B -m unittest test_load_cell_contact_onset
+```
+
+### DEV contact-model qualification and real replay (2026-11-02)
+
+The five complete acquisitions from 2026-11-02 (three cold, two at targets
+60/170 C) are retained in
+`test/fixtures/load_cell_contact_cold_hot_20261102.json`: 1270, 1266, 1272,
+1305 and 1310 original samples. All five replay with the original primary
+offsets and rejection decisions. Both hot descents are `identified`; both
+hot ascents are `insufficient_signal`, producing the pair rejection
+`unsupported_contact_branches`. The previous console incorrectly showed an
+unavailable descent because qualification returns before copying either fit
+when one branch is unsupported. It also displayed the primary ascent result
+as if it were a supported ascent estimate. Reporting now separates the two
+branch estimates/statuses from the unchanged `primary_fit_z` and observational
+offset. There is no estimator correction, window substitution or relaxed gate.
+
+In the hot ascent fits, observed peak minus fitted free-region mean is
+45.912/49.576 indicated g; the existing five-noise-RMS check requires
+52.043/50.370 g. The free-region force/Z slopes are +199.190/+183.816 g/mm,
+also incompatible with the existing flat-region check (19.344/20.779 g/mm).
+The negative valleys reach -23.327/-31.161 g and then rebound in the original
+ADC counts. Sample times are ordered, both coordinate frames are consistent,
+and the recorded rate is approximately 82.624 Hz. There is no evidence here
+of a unit-conversion, branch-ordering or sample-window indexing defect.
+The full five-second ascent does not support the stationary unloaded region
+of the hinge model. Shorter fits are not an established physical surface;
+neither temperature compensation nor a mechanical cause is inferred.
+
+```bash
+PYTHONPATH=test/unit python3 -B -m unittest test_load_cell_hot_contact
+python3 -B scripts/replay_load_cell_contact.py --fixture test/fixtures/load_cell_contact_cold_hot_20261102.json
+```
+
+For a prepared, homed, mesh-free cold DEV printer, the existing Auto Z-offset
+pipeline can perform one observational P1 pair:
+
+```text
+AUTO_Z_OFFSET DIAGNOSTIC=1 COLD=1
+```
+
+This uses native CR Touch probing and an integrated, fresh-reference-relative
+HX711 endpoint. It does not home, visit P2, retry contact or run a
+multi-pair calibration. CR Touch's existing internal sample count is retained.
+The existing sensor, tare/raw protections, LCBestFit and offset formula are
+unchanged. Omit COLD to use the existing configured heated preparation;
+COLD cannot be combined with temperature parameters.
+
+Branch disagreement is reported with both fits and the observational offset,
+without turning the rejected model into a candidate. Diagnostic reports have
+`diagnostic_only: True` and `eligible_for_application: False`; even internal
+agreement cannot qualify points, stage a value or enable ACCEPT. Safety and
+cleanup errors still propagate. Full AUTO_Z_OFFSET and AUTO_Z_OFFSET_CALIBRATE
+are enabled without separate manual qualification. No MCU or additional
+configuration is required. The owner reloads DEV host modules; no
+physical experiment is run by the offline tests.
+
+The C0 command blocks and seven mandatory `test_*` limits have been removed.
+Old `test_*` entries are consumed only for configuration compatibility and
+cannot select motion endpoints. The C0-only TEST_PROBE command is retired;
+normal PROBE, G28, primary-probe endstops and coordinate handling are unchanged.
+Every nozzle tap instead passes explicit bounds to the existing contact
+engine: `floor = cr.bed_z - load_cell_retract_dist`, using the existing tap
+retraction distance. The maximum approach distance is clearance minus this
+floor. A non-finite endpoint, endpoint at/below the native minimum or endpoint
+at/above clearance rejects the nozzle approach. There is no fallback to the
+global minimum, deeper retry or stale cold Z0 endpoint. Fresh paired CR Touch
+readings update the reference in the current thermal/coordinate state. This
+is finite-travel fault containment, not a guarantee of physical force safety.
+Raw MCU force/range/sensor guards and model-consistency checks remain active.
+
+The three original acquisitions are retained without decimation in
+`test/fixtures/load_cell_contact_real.json` (1279, 1337 and 1342 samples).
+The fixture includes original raw ADC counts, forces, sample timestamps,
+reconstructed Z, reference snapshots, paired CR Touch records, source log
+line numbers and its SHA256. It preserves the active 114.88636 counts/g
+conversion. These are reconstructed coordinates, not independent physical
+displacement measurements.
+
+Run the deterministic offline replay from the checkout root:
+
+```bash
+python3 -B scripts/replay_load_cell_contact.py
+python3 -B -m unittest discover -s test/unit -p 'test_load_cell_contact.py'
+```
+
+The replay uses the installed LCBestFit and the existing diagnostic branch
+processing. Every original sample timestamp and reconstructed position is
+reused; no configured nominal rate substitutes for timestamps. No force
+rescaling, tare correction, midpoint replacement or printing-offset target
+is used. The first fixture matches the original standalone P1 diagnostic.
+The command reports source hashes and never connects to Klipper or a printer.
+
+| Acquisition | Original ascent-based offset | Descent-based interpretation | Branch difference | New decision at 0.025 mm |
+| --- | --- | --- | --- | --- |
+| 14:24 | 1.094167 mm | 1.028626 mm | 0.065541 mm | Reject inconsistent model |
+| 15:39 | 1.502229 mm | 1.445725 mm | 0.056504 mm | Reject inconsistent model |
+| Later | 1.515000 mm | 1.526166 mm | 0.011166 mm | Internally consistent; physical bias unknown |
+
+`load_cell_contact.qualify_contact()` checks both identified branches,
+coordinate/timing integrity, acquisition errors and a sustained descending
+force rise. It requires the span of descent/ascent/primary contact estimates
+to fit within the existing `offset_tolerance`. This is an experimental
+agreement budget, not a statistically derived confidence interval. Samples
+are not assumed independent, and disagreement is not divided by sqrt(N).
+The primary result is still the existing ascent fit; no estimator is replaced.
+
+Auto Z-offset consumes the already computed report after the original
+retraction and primary fit. Missing diagnostics or failed qualification stop
+the pair without a candidate/retry. Model rejection retains `last_contact`
+with null `offset`, original `model_offset` and `contact_qualification`.
+The ordinary load-cell probe's result/error behavior remains unchanged;
+MCU errors continue to propagate before qualification is reached.
+
+This intentionally rejects the first acquisition too: closeness to the
+functional 1.065 mm is not an acceptance criterion. Conversely, the third
+acquisition cannot honestly be rejected solely because it yields 1.515 mm.
+Its two branches agree despite the suspected shared bias. The reported
+`physical_contact_verified` remains False and `physical_uncertainty_mm`
+remains null (unknown), including for an internally consistent model.
+`contact_model_span_mm` describes the available model estimates only and
+does not bound the true physical surface.
+
+The large between-acquisition shift is already present on descent. Descent
+slopes are approximately -500, -554 and -1006 indicated g/mm, so the complete
+series is not explained by a rigid Z translation alone. Force-transfer
+preload/compliance, nonstationary signal behavior and actual motion/reference
+differences remain competing explanations. Without an independent reference,
+a common displacement of both branches is unidentifiable: translating both
+fits preserves their internal agreement. The new gate detects branch
+inconsistency; it does not claim to solve the approximately 0.4 mm bias.
+Integrated nozzle bounds, MCU stopping, B1 calibration and
+saved printer configuration are unchanged. No physical operation is part
+of this replay or implementation.
+
+The runtime now adds the same window-sensitivity measurements as diagnostics
+only. `window_sensitivity` is retained in the tap JSON, pair frame and
+`auto_z_offset.last_contact`, alongside the existing `contact_qualification`.
+It does not select another Z or change that qualification verdict. The full
+descent and full retraction fits are reused when their windows match; other
+windows call the unchanged LCBestFit on the already reconstructed samples.
+Analysis is bounded to the existing per-fit sample budget and fixed windows.
+Residuals use the least-squares baseline at each window's fitted hinge/slope;
+they are descriptive values, not independent-sample standard errors.
+
+| Acquisition | Previous runtime sensitivity | Added descent variation | Added retraction variation | Existing verdict |
+| --- | --- | --- | --- | --- |
+| 14:24 | Not reported | 0.057488 mm | 0.029794 mm | Rejected |
+| 15:39 | Not reported | 0.046314 mm | 0.013062 mm | Rejected |
+| Later hot | Not reported | 0.001757 mm | 0.001991 mm | Internally consistent, physical bias unknown |
+| 2026-11-02 cold | Not reported | 0.000783 mm | 0.000070 mm | Rejected |
+
+The cold trace retains all 1270 original samples in
+`test/fixtures/load_cell_contact_cold_20261102.json`. Fixed pre-integration
+window-fit values for all four acquisitions are retained in
+`test/fixtures/load_cell_window_reference.json`. Focused tests check all 36
+window fits, their residuals/slopes, unchanged primary results/verdicts,
+incomplete windows/references and diagnostic-error isolation. Insufficient
+coverage or fewer than two distinct valid windows produces null sensitivity.
+There is no stable/unstable threshold and no claim that numerical stability
+locates the true physical surface. MCU, motion bounds, saved calibration and
+the current experimental 0.025 mm branch protection are unchanged.
+
+```bash
+python3 -B -m unittest discover -s test/unit -p 'test_load_cell_window_diagnostics.py'
+python3 -B scripts/replay_load_cell_contact.py --fixture test/fixtures/load_cell_contact_cold_20261102.json
+```
+
 The owner reports a working printing offset of 1.065 mm, automatic results
 around 1.48-1.52 mm, and excessive nozzle pressure/PEI marks when adopting
 the automatic result. Manual PROBE_CALIBRATE at comparable hot conditions
@@ -798,9 +1008,9 @@ trigger and release estimator. There are no force increases, automatic retries
 or synthetic contacts. An error invalidates qualification; do not proceed if
 a remote location fails to trigger or visibly deforms excessively. A successful
 fit is necessary but does not certify actual mechanical force at that point.
-No homing, restart, force/probe recalibration or disconnection may intervene
-between qualification and calibration. `verified_points` records the successful
-one-based indices; `contact_verified` becomes true only after all four pass.
+The separate contact tests are optional diagnostics. Calibration does not
+require their prior completion. `verified_points` and `contact_verified`
+record successful tests for information only; they are not a manual gate.
 
 Then request the twelve-pair measurement:
 
@@ -972,9 +1182,10 @@ entry; this does not indicate that motion turned the heaters off. Preset the
 chosen targets outside measurement commands to retain them across tests and
 calibration. A longer bounded temperature_recovery_time can allow a slow
 return to the same band; it does not widen the band or guarantee recovery.
-Ordinary thermal timeouts currently invalidate all location qualifications,
-so the existing flow requires successful TEST_CONTACT at every point again
-before another CALIBRATE. A configuration reload also invalidates them.
+At the time of this historical run, thermal timeouts invalidated all location
+qualifications and required fresh TEST_CONTACT results before CALIBRATE.
+That manual prerequisite has since been removed; errors still invalidate
+candidates and every calibration acquires fresh paired measurements.
 
 ### 2026-10-29: complete hot run after thermistor cable replacement
 

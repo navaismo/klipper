@@ -6,6 +6,8 @@ from unittest import mock
 import test_tjc_lcd as startup
 import lcd_status
 import lcd_transfer
+import lcd_draw
+import lcd_idle_layout
 import pause_resume
 import test_lcd_autostart as autostart
 
@@ -167,7 +169,8 @@ class JobHostTests(unittest.TestCase):
         self.assertFalse(self.module.rendered)
         self.assertIsNone(self.module.job_filename)
         self.assertEqual(b''.join(data for off, data in self.sent),
-                         lcd_transfer.prepare_idle('unknown')['data'])
+                         lcd_transfer.prepare_idle(
+                             self.mcu.get_status(0.)['mcu_version'])['data'])
         self.reactor.register_callback.assert_called_once()
 
     def test_idle_reports_connected_mcu_version_without_canvas_support(self):
@@ -356,6 +359,139 @@ class JobHostTests(unittest.TestCase):
         self.reactor.register_callback.assert_not_called()
 
 
+class IdleVersionTests(unittest.TestCase):
+    setUp = JobHostTests.setUp
+    ack = JobHostTests.ack
+
+    def enable_drawing(self):
+        self.draw_commands = tuple(mock.Mock() for i in range(4))
+        self.module.draw_commands = self.draw_commands
+        self.draw_sent = []
+        def begin(args):
+            self.sent[:] = []
+            self.ack(0, 1)
+        self.begin.send.side_effect = begin
+        def draw_begin(args):
+            self.draw_sent[:] = []
+            self.ack(0, 1)
+        self.draw_commands[0].send.side_effect = draw_begin
+        def op(args):
+            self.draw_sent.append(args[3])
+            self.ack(args[2] + len(args[3]), 1)
+        self.draw_commands[1].send.side_effect = op
+        self.draw_commands[2].send.side_effect = lambda a: self.ack(
+            sum(map(len, self.draw_sent)), 2)
+
+    def test_actual_mcu_revision_is_added_without_changing_idle_artwork(self):
+        self.enable_drawing()
+        self.mcu.get_constants.return_value['TJC_IDLE_VERSION'] = 1
+        self.module.render_idle()
+        self.assertEqual(b''.join(data for off, data in self.sent),
+                         lcd_transfer.prepare_idle()['data'])
+        self.assertEqual(self.draw_sent, [op for off, op in lcd_draw.prepare(
+            lcd_idle_layout.firmware_footer(
+                self.mcu.get_status.return_value['mcu_version']))['chunks']])
+        self.assertEqual(lcd_idle_layout.firmware_footer_text(
+            self.mcu.get_status.return_value['mcu_version']),
+                         'FW: 3ae38934-dirty 2026-11-02')
+        for op in self.draw_sent:
+            lcd_draw.validate(op)
+        self.assertEqual(self.module.screen, 'idle')
+        self.assertFalse(self.module.rendered)
+        self.mcu.get_status.assert_called_once_with(10.)
+        self.draw_commands[3].send.assert_not_called()
+
+    def test_legacy_v5_retains_identification_without_generic_drawing(self):
+        self.mcu.get_status.return_value = {'mcu_version': 'a1234567'}
+        self.module.render_idle()
+        self.assertEqual(b''.join(data for off, data in self.sent),
+                         lcd_transfer.prepare_idle('a1234567')['data'])
+        self.assertEqual(self.module.screen, 'idle')
+
+    def test_returning_to_idle_draws_the_version_again(self):
+        self.enable_drawing()
+        for previous in ('blank', 'job', 'menu'):
+            self.module.screen = previous
+            self.module.render_idle()
+            expected = lcd_draw.prepare(lcd_idle_layout.firmware_footer(
+                self.mcu.get_status.return_value['mcu_version']))
+            self.assertEqual(self.draw_sent, [op for off, op
+                                              in expected['chunks']])
+            self.assertEqual(self.module.screen, 'idle')
+        self.draw_commands[0].send.assert_called_with(mock.ANY)
+        self.assertEqual(self.draw_commands[0].send.call_count, 3)
+
+    def test_unknown_long_and_gbk_versions_are_bounded_and_printable(self):
+        self.assertEqual(lcd_idle_layout.firmware_text(None), 'FW: --')
+        self.assertEqual(lcd_idle_layout.firmware_text(
+            'v0.13.0-1-gabc-dirty-20261102_182347-host'),
+                         'FW: v0.13.0-1-gabc-dirty')
+        for version in ('A'*200, '\u6750'*200, 'a\n\r\x00\x7fb'):
+            ops = lcd_idle_layout.firmware_footer(version)
+            lcd_draw.prepare(ops)
+            self.assertLessEqual(len(lcd_idle_layout.firmware_footer_text(
+                version)), 29)
+
+    def test_firmware_build_date_and_unknown_dates(self):
+        for version, expected in (
+                ('abc-dirty-20261102_182347-host', 'FW: abc-dirty 2026-11-02'),
+                ('abc-20240229_010203', 'FW: abc 2024-02-29'),
+                ('abc-20260229_010203-host', 'FW: abc --'),
+                ('abc', 'FW: abc --'),
+                (None, 'FW: -- --')):
+            self.assertEqual(lcd_idle_layout.firmware_footer_text(version),
+                             expected)
+
+    def test_small_footer_stays_below_idle_and_clear_of_corner_artwork(self):
+        import struct
+        ops = lcd_idle_layout.firmware_footer(
+            '3ae38934-dirty-20261102_182347-IrohKlipper')
+        pixels = set()
+        for op in ops:
+            self.assertEqual(op[0], 2)
+            color, x0, y0, x1, y1 = struct.unpack('>HHHHH', op[1:])
+            self.assertEqual(color, 0x8d7b)
+            self.assertGreaterEqual(y0, 309)
+            self.assertLessEqual(y1, 315)
+            self.assertGreaterEqual(x0, 33)
+            self.assertLessEqual(x1, 205)
+            for y in range(y0, y1+1):
+                for x in range(x0, x1+1):
+                    self.assertNotIn((x, y), pixels)
+                    pixels.add((x, y))
+        # The first F has a full top stroke, middle bar and left stem.
+        first = [''.join('#' if (33+x, 309+y) in pixels else '.'
+                         for x in range(5)) for y in range(7)]
+        self.assertEqual(first, ['#####', '#....', '#....', '####.',
+                                  '#....', '#....', '#....'])
+
+    def test_footer_failure_aborts_drawing_protocol_and_prevents_print(self):
+        self.enable_drawing()
+        self.draw_commands[1].send.side_effect = None
+        with self.assertLogs(level='WARNING'):
+            with self.assertRaisesRegex(RuntimeError, 'acknowledgement'):
+                self.module.render_idle()
+        self.draw_commands[3].send.assert_called_once()
+        self.abort.send.assert_not_called()
+        with self.assertRaisesRegex(RuntimeError, 'not ready'):
+            self.module._handle_before_print('cube.gcode')
+
+    def test_print_waits_for_both_idle_and_firmware_footer(self):
+        self.module.state, self.module.render_kind = 'rendering', 'idle'
+        base = self.module.render_completion = startup.Completion()
+        footer = startup.Completion()
+        def next_transfer():
+            self.module.render_completion = footer
+        def finish():
+            self.module.state = 'ready'
+            self.module.render_completion = None
+        base.wait.side_effect = next_transfer
+        footer.wait.side_effect = finish
+        self.module._handle_before_print('cube.gcode')
+        base.wait.assert_called_once()
+        footer.wait.assert_called_once()
+
+
 class NativeJobTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -395,8 +531,10 @@ class NativeJobTests(unittest.TestCase):
         if targets is not None:
             job.update(targets)
             lcd_status.finalize_job(job)
-        transfer = lcd_transfer.prepare_idle(idle_version, idle_footer) \
-            if idle else job['transfer']
+        transfer = (lcd_transfer.prepare_idle(indicator=idle)
+                    if isinstance(idle, str) else
+                    lcd_transfer.prepare_idle(idle_version, idle_footer)
+                    if idle else job['transfer'])
         data = bytearray(transfer['data'])
         if damage is not None:
             offset, value = damage
@@ -514,6 +652,11 @@ class NativeJobTests(unittest.TestCase):
     def test_idle_text_too_wide_is_rejected_before_drawing(self):
         self.run_job(None, 'invalid', idle=True, damage=(13, 13))
 
+    def test_legacy_idle_firmware_identification_is_rendered(self):
+        frames = self.run_job(None, 'idle', idle='Idle FW: a1234567',
+                              trace=True)
+        self.assertTrue(any(f[0] == 0x98 and f[12:] == b'Idle FW: a1234567'
+                            for f in frames))
     def test_idle_keeps_url_and_centers_firmware_using_verified_8x16_font(self):
         frames = self.run_job(None, 'idle', idle=True, trace=True,
             idle_version='43fc76cb-dirty-20261029_211120-IrohKlipper',

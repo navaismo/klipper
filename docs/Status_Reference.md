@@ -133,6 +133,11 @@ communicate with the LCD:
   and `chunk_count`. Payload bytes are excluded. This is a prepared
   application format; the descriptor alone does not indicate a completed
   transfer. Check `tjc_lcd.rendered` for the last render result.
+  With generic drawing firmware, this descriptor remains the legacy
+  diagnostic representation; the host-owned card uses drawing operations
+  instead. Its model area scales the prepared 96x96 image to 120x120 with
+  the same colors. These status image dimensions and transfer byte counts describe preparation,
+  not the generic card's panel dimensions or on-wire drawing size.
 - `job.transfer.image`: Null without a thumbnail; otherwise `encoding`
   (`rects565` or `rgb565be`), encoded `size` including its codec byte,
   `raw_size` (18432), rectangle count and nonblack color count. For raw
@@ -164,17 +169,53 @@ The fork-specific [tjc_lcd](Config_Reference.md#tjc_lcd) object provides:
   and its trailing handshake/settling checkpoint. False after startup,
   clear, a new render, or disconnect. This is not a pixel-level panel ACK.
 - `job_filename`: Filename of that successfully rendered job, otherwise null.
-- `screen`: `blank`, `job`, `idle`, `calibration`, `calibration_result`,
-  `custom`, or null while rendering, on error or disconnected. `rendered` is specific
-  to a job card; an idle/calibration screen sets
-  `rendered` to False and `job_filename` to null.
+- `screen`: `blank`, `job`, `idle`, `menu`, `calibration`,
+  `calibration_result`, `custom`, or null while rendering, on error or
+  disconnected. `rendered` is specific to a job card; an idle/calibration
+  screen sets `rendered` to False and `job_filename` to null.
 
 Status reads do not issue MCU commands or LCD traffic. A disconnect or
 shutdown sets `disconnected`. Starting a print waits for a pending LCD
 operation and requires `ready`; pause/resume does not repeat initialization.
-The idle screen's firmware line comes from the configured display MCU's
-existing `mcu_version` status field. It does not report the local checkout or
-out/klipper.dict version and does not query/refresh periodically.
+An explicit idle `LCD_RENDER` can recover a prior error with bounded
+handshake/clear before drawing; automatic print preparation retains the
+error gate. `LCD_PREPARE` succeeding does not establish LCD readiness.
+
+## tjc_menu
+
+The optional fork-specific [tjc_menu](Config_Reference.md#tjc_menu) object
+provides:
+
+- `active`: True while the menu owns the screen, including its actions.
+- `page`: `main`, `move`, or null when closed.
+- `selected`: The selected entry's label, or null when closed.
+- `busy`: True during a menu drawing or menu action. Navigation is discarded;
+  a stable knob press can still cancel an active filament operation.
+- `error`: The latest menu/action error, or null. A click dismisses a
+  displayed error without repeating the failed action.
+  Printing-time PAUSE errors are reported here and in the console without
+  drawing an error screen.
+- `filament_action`: `load` or `unload` during the filament operation,
+  otherwise null.
+- `cancel_requested`: True between an accepted filament cancel press and
+  completion of cleanup; False otherwise.
+
+During printing the menu is inactive. A new debounced press can run
+`PAUSE`; this does not change `screen: job` or redraw the static card.
+Paused clicks do not resume. Status reads remain passive.
+Navigation keeps one pending latest-selection redraw with a 200 ms
+cooldown after completion. `selected` can describe the pending selection
+before it becomes visible; it does not acknowledge a panel redraw.
+
+Reading status performs no LCD traffic or printer actions. A menu closes
+on pre-print preparation, LCD reinitialization/clear/idle, file reset,
+shutdown, or disconnect. Only active idle Load/Unload screens refresh
+changed nozzle temperature values, at most once per second. These
+updates stop with the operation and never run during printing or pause.
+Auto Z-offset calibration reserves the LCD, closes the menu and rejects
+menu actions or a new print until its active calibration session ends.
+See the [setup guide](TJC_LCD_Setup.md#lcd-commands-and-status) and
+[API query example](API_Server.md#objectsquery) for diagnostics.
 
 ## endstop_phase
 
@@ -423,8 +464,14 @@ The following information is available for each `[load_cell name]`:
 The following information is available for `[auto_z_offset]`:
 
 - `state`: `disconnected`, `idle`, `heating`, `measuring`, `contact_ready`,
-  `candidate`, `rejected`, `accepted`, or `error`.
-- `contact_verified`: Whether supervised contact is qualified at every point.
+  `candidate`, `rejected`, `accepted`, `diagnostic_complete`,
+  `diagnostic_rejected`, or `error`. Diagnostic completion only describes
+  diagnostic descent-onset support; it never qualifies an offset for
+  application. The original withdrawal/branch comparison is informational
+  in DIAGNOSTIC mode, even when that legacy comparison is rejected.
+- `contact_verified`: Whether successful separate contact tests have been
+  recorded at every point with current references. Informational only;
+  CALIBRATE does not require prior manual test qualification.
 - `stage`: Current/last step, such as `preflight`, `warm-up`, `mesh clear`,
   `homing`, `Test P1 pair 1`,
   `Calibrate P2 pair 3`, `spatial validation`, or `complete`. Failures retain
@@ -445,18 +492,80 @@ The following information is available for `[auto_z_offset]`:
   retains this report without a candidate. Acceptance retains the report but
   consumes the candidate; it does not change the active probe offset.
 - `error`: The last measurement/cleanup error, or null.
-- `last_contact`: Null or the most recent successful pair's diagnostic report.
+- `last_contact`: Null or the most recent completed pair's diagnostic report,
+  including a pair rejected by the post-acquisition contact-model check.
   Contains one-based `point_index` and `sample_index`, `point` (physical bed
   XY), `cr_trigger_z`, `force_trigger_z`,
   `regression_z`, `regression_delta` (regression minus force-trigger Z),
-  `offset`, `saved_offset`, and `mesh_active` (False for these measurements).
+  `offset` (null for a rejected model), `model_offset` (the unmodified numerical
+  formula result), `saved_offset`, and `mesh_active` (False for these
+  measurements). `contact_bounds` records `minimum_z`, `maximum_descent`,
+  and the fresh CR Touch `surface_reference_z` for the nozzle approach.
   All positions/distances are in mm in the toolhead frame. Also contains
   `temperatures_before` and `temperatures_after`: each has `bed` and `nozzle`
   objects with `measured` and `target` in C, sampled around the nozzle tap.
   This report is available after TEST_CONTACT without staging an offset.
+  Local DEV `AUTO_Z_OFFSET DIAGNOSTIC=1` also retains this report, with
+  `diagnostic_only: True`, `eligible_for_application: False`,
+  `descent_fit_z` and `ascent_fit_z` (null for unsupported branches),
+  `descent_status` and `ascent_status` (the original branch verdicts),
+  `primary_fit_z` (the original LCBestFit result before branch qualification),
+  and
+  `observational_offset` (the unchanged formula result, in mm).
+  Its `offset` is always null, `candidate` is False, `result` is null,
+  and no point is qualified, regardless of model consistency. The nested
+  model's `eligible_for_candidate` is a mathematical verdict only and cannot
+  authorize application in this mode.
+  `contact_onset` is the diagnostic descent-only result: `status`
+  (`identified` or `unresolved`), `z` (null when unresolved), `reasons`,
+  `observational_offset` (cr.test_z minus z, or null),
+  `withdrawal_minus_onset_mm`, `supported_window_count`, and `windows`.
+  It always has `diagnostic_only: True`, `eligible_for_application: False`;
+  physical accuracy is unvalidated and physical uncertainty remains unknown.
+  Supported results expose `selected_window_s`, the local
+  `baseline_force_g` at `baseline_time_s`, `baseline_drift_g_per_s`,
+  `baseline_rms_g`, `compression_slope_g_per_mm`, `effective_samples`,
+  and `delta_bic` (evidence against a drifting-baseline-only model).
+  Windows retain `model_z` even when unresolved, but only supported windows
+  have non-null `z`. They report sample/effective counts per fitted region,
+  residual RMS, baseline drift, compression slope, the correlation-adjusted
+  profile interval and observed sample spacing. `window_span_mm` and
+  `interval_z_mm` describe the supported-window estimates and their envelope.
+  The nominal 95% profile convention is approximate and model-conditional;
+  it is not a calibrated physical-contact confidence level. Shared sensor
+  delay, force-transfer bias and model misspecification remain unknown.
+  `contact_qualification` contains `status` (`rejected` or
+  `internally_consistent`), `eligible_for_candidate`, reason codes in
+  `reasons`, `maximum_span_mm` (the configured offset tolerance),
+  `branch_disagreement_mm`, and, when available, `descent_fit_z`,
+  `ascent_fit_z`, `primary_fit_z`, `primary_ascent_difference_mm`,
+  `contact_model_span_mm` (lowest/highest estimate) and `model_span_mm`
+  (their difference). These spans are descriptive disagreement, not
+  confidence intervals. `physical_contact_verified` is False and
+  `physical_uncertainty_mm` is null (unknown); internal agreement does not
+  establish physical accuracy or authorize applying/saving calibration.
+  `window_sensitivity` is a diagnostic-only object, also retained in the
+  `Load cell tap diagnostic` JSON log. `descent` and `ascent` each contain:
+  `windows`, `valid_window_count`, `distinct_window_count`, and
+  `max_z_variation_mm` (maximum minus minimum fitted Z across at least two
+  distinct valid windows, otherwise null). Each window records `window_s`
+  (null means full recorded descent), `time_reference`, `status` and `z`.
+  Identified fits also record sample/analyzed counts, stride, actual
+  `data_time_bounds_s`, loaded/free counts, `force_slope_g_per_mm`, fitted
+  `baseline_g`, `residual_rms_g`, `loaded_residual_rms_g` and
+  `free_residual_rms_g`. Errors or inadequate time/sample support have an
+  explicit status, never a fabricated Z or zero sensitivity.
+  The top-level object contains `branch_difference_mm` (ascent minus descent,
+  when comparable), `status` (`available`, `partial`, `unavailable`, or a
+  reference/timing/diagnostic failure), `diagnostic_only` (True),
+  `physical_contact_bias` (`unknown`) and `absolute_accuracy_validated`
+  (False). No sensitivity rejection threshold is used. The existing verdict
+  remains in the separate `contact_qualification` object.
 
 Homing, load-cell recalibration, disconnect and shutdown invalidate the result.
-They also clear `last_contact`; a new run or failed measurement clears it.
+They also clear `last_contact`; a new run or failed acquisition clears it.
+A model-consistency rejection retains its completed report and reason, while
+clearing all qualification and candidates.
 Configuration changes to the probe or force calibration also prevent accepting
 a stale candidate. Nothing is persisted until explicit acceptance and the
 subsequent standard `SAVE_CONFIG` operation.

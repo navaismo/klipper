@@ -199,10 +199,19 @@ class BLTouchProbe:
         if self.multi == 'OFF':
             self._verify_raise_probe()
         self._sync_print_time()
-    def run_probe(self, gcmd):
+    def run_probe(self, gcmd, descent_bounds=None):
+        if descent_bounds is not None:
+            z = self.printer.lookup_object('toolhead').get_position()[2]
+            descent_bounds.target_z(self.printer, z,
+                                    self.homing_helper.z_min_position)
+            if self.multi in ('OFF', 'FIRST'):
+                descent_bounds.check_deploy(self.printer, z)
         self._probe_prepare()
         try:
-            self.homing_helper.descend_until_trigger(gcmd)
+            if descent_bounds is None:
+                self.homing_helper.descend_until_trigger(gcmd)
+            else:
+                self.homing_helper.descend_until_trigger(gcmd, descent_bounds)
         except self.printer.command_error as e:
             self._probe_finish()
             raise
@@ -297,7 +306,23 @@ class PrinterBLTouch:
         return self.probe_offsets.get_offsets(gcmd)
     def get_status(self, eventtime):
         return self.cmd_helper.get_status(eventtime)
-    def start_probe_session(self, gcmd):
+    def check_probe_session_bounds(self, bounds, start_z):
+        if not isinstance(bounds, probe.ProbeSessionBounds):
+            raise self.printer.command_error("Unsupported probe session bounds")
+        endpoint = bounds.target_z(self.printer, start_z,
+                                   self.mcu_probe.homing_helper.z_min_position)
+        bounds.check_deploy(self.printer, start_z)
+        params = self.get_probe_params()
+        if (self.mcu_probe.stow_on_each_sample
+                and (params['samples'] > 1
+                     or params['samples_tolerance_retries'] > 0)):
+            bounds.check_deploy(self.printer,
+                                endpoint + params['sample_retract_dist'])
+    def start_probe_session(self, gcmd, descent_bounds=None):
+        if descent_bounds is not None:
+            z = self.printer.lookup_object('toolhead').get_position()[2]
+            self.check_probe_session_bounds(descent_bounds, z)
+            return self.probe_session.start_probe_session(gcmd, descent_bounds)
         return self.probe_session.start_probe_session(gcmd)
 
 def load_config(config):

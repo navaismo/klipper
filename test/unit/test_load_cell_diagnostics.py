@@ -496,6 +496,7 @@ class IntegrationTests(unittest.TestCase):
                        for item in logs.output if 'Load cell tap diagnostic:'
                        in item)
         report = json.loads(payload)
+        self.assertEqual(tap.get_contact_diagnostics(), report)
         self.assertEqual(report['sample_count'], 497)
         self.assertEqual(report['motion']['safety']['force_safety_limit'], 200.)
         self.assertFalse(report['motion']['homing_workaround'])
@@ -514,9 +515,10 @@ class IntegrationTests(unittest.TestCase):
         with mock.patch.object(diag, 'build_report',
                                side_effect=RuntimeError('observer failed')):
             with self.assertLogs(level='WARNING'):
-                result, after, _ = self.tap(True)
+                result, after, tap = self.tap(True)
         self.assertEqual(normal, result)
         self.assertEqual(before, after)
+        self.assertIsNone(tap.get_contact_diagnostics())
 
     def test_snapshot_exceptions_at_all_four_stages_preserve_result(self):
         original = diag.snapshot
