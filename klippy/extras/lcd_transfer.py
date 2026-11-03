@@ -204,7 +204,7 @@ def _firmware_line(version, compact=False):
     return 'FW: ' + version
 
 
-def prepare_idle(mcu_version=None, version_footer=False):
+def prepare_idle(mcu_version=None, version_footer=False, indicator='Idle'):
     # Same bounded transport; the MCU draws the logo and chooses idle layout.
     # Unused slots stay nonempty to retain the receiver's text validation.
     model, firmware = 'Ender 3 V3 SE', '--'
@@ -214,7 +214,7 @@ def prepare_idle(mcu_version=None, version_footer=False):
         else:
             model = _firmware_line(mcu_version, compact=True)
     texts = ('Klipper', model, 'github.com/navaismo/klipper',
-             firmware, 'Idle', '--', '--', '--', '--')
+             firmware, indicator, '--', '--', '--', '--')
     limits = (12, 20, 27, 27, 20, 2, 2, 2, 2)
     encoded = [_text_bytes(text, limit)
                for text, limit in zip(texts, limits)]

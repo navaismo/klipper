@@ -1,5 +1,18 @@
 # Configuration Changes
 
+20261102 (fork diagnostic contact onset): DIAGNOSTIC=1 additionally estimates
+descent onset against a drifting baseline. Diagnostic state follows onset
+support; the original withdrawal/branch verdict is informational in this mode.
+The normal estimator, force/movement limits and configuration are unchanged.
+No new setting is required, and no onset result can be applied or saved.
+
+20261102 (fork contact diagnostic reporting): AUTO_Z_OFFSET DIAGNOSTIC=1
+reports supported descent/ascent estimates directly from the acquisition
+report, independently of a rejected pair's incomplete qualification summary.
+An unsupported ascent has null ascent_fit_z; primary_fit_z retains the original
+LCBestFit result before qualification. Per-branch status explains the failure.
+Offset calculation, branch checks, motion and MCU behavior are unchanged.
+
 This document covers recent software changes to the config file that
 are not backwards compatible. It is a good idea to review this
 document when upgrading the Klipper software.
@@ -7,6 +20,39 @@ document when upgrading the Klipper software.
 All dates in this document are approximate.
 
 ## Changes
+
+20261102 (fork LCD): The full host-designed LCD setup and optional
+`[tjc_menu]` require connected MCU firmware advertising `TJC_DRAW_VERSION=1`
+alongside `TJC_LCD_VERSION=1` and `TJC_JOB_VERSION=5`. Keep
+`CONFIG_TJC_LCD=y`, GPIO button support, the working bootloader/clock and
+USART1 host connection. Older v5 firmware retains its legacy card but
+cannot enable the knob module. Once these capabilities are installed,
+new layouts and controls are host updates, without another flash. The
+current card displays a 120x120 thumbnail from the prepared 96x96 image;
+status preparation dimensions and the legacy v5 descriptor are unchanged.
+Add `[tjc_menu]` to enable knob navigation and printing-time `PAUSE`;
+it is not enabled by compiling alone. The standard pause support loads
+automatically and existing macro overrides remain in effect. See the
+[setup guide](TJC_LCD_Setup.md) for configuration, migration and recovery.
+
+20261102 (fork Auto Z-offset native workflow): Remove local C0 command blocks,
+mandatory test_* bounds and manual qualification dependencies. Normal
+AUTO_Z_OFFSET and CALIBRATE are enabled; DIAGNOSTIC=1 stays observational.
+Retired test_* entries are accepted but ignored. The C0-only
+AUTO_Z_OFFSET_TEST_PROBE command is removed. Native CR Touch probing is used;
+every nozzle descent has an explicit endpoint from the fresh cr.bed_z minus
+the existing tap retraction distance, strictly above the native Z minimum.
+An invalid bound fails before nozzle approach; no unbounded fallback exists.
+MCU force protections, saved calibration and the offset formula are unchanged.
+
+20261102 (fork Auto Z-offset contact interpretation): Completed Auto Z-offset
+taps now require valid bidirectional diagnostics and a sustained descending
+force rise. The span of descent/ascent/primary contact estimates must not
+exceed `offset_tolerance`, which still bounds repeated paired measurements.
+Failure rejects the pair and retains a diagnostic report with null `offset`;
+`model_offset` retains the original formula for analysis. Motion, raw MCU
+protection, LCBestFit, saved offsets and load-cell calibration are unchanged.
+An internally consistent model is not a physically validated offset.
 
 20261101 (fork Auto Z-offset homing): Completed homing now invalidates a
 pending candidate and contact qualification, including Z-only homing through

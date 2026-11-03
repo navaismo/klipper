@@ -4911,8 +4911,10 @@ lcd_type:
 
 Fork-specific collection of static LCD job data from Moonraker before a print.
 This module prepares metadata, converts PNG/JPEG thumbnails to 96x96 RGB565,
-and builds a binary job payload. With `[tjc_lcd]` also enabled, automatic
-preparation sends the payload to its MCU renderer before printing.
+and builds a legacy binary job descriptor. With `[tjc_lcd]` also enabled,
+automatic preparation renders before printing. Generic drawing firmware
+uses a host-composed card with a 120x120 displayed thumbnail; older job-v5
+firmware uses the legacy binary payload and 96x96 display.
 The data module never opens an LCD serial port or builds LCD frames.
 All labels and numeric text are formatted on the host; the estimated
 total duration uses `hh:mm:ss`. The C driver only draws the strings.
@@ -4922,6 +4924,8 @@ Pillow is included in `scripts/klippy-requirements.txt`, used by the normal
 host installers and requirement-aware Moonraker updates.
 The Ender-3 V3 SE LCD remains connected to the mainboard USART and needs
 the separate C firmware driver described in [LCD_STATUS_PLAN.md](LCD_STATUS_PLAN.md).
+The [setup guide](TJC_LCD_Setup.md) and
+[complete sample](../config/sample-tjc-lcd.cfg) cover all three LCD modules.
 
 ```
 [lcd_status]
@@ -5000,8 +5004,36 @@ Connecting or reconnecting Moonraker alone does not redraw the LCD.
 Startup idle drawing is retained through the intermediate clearing state.
 The idle_timeout:idle event also draws once when ready and neither
 printing nor paused, unless the idle screen is already showing.
+Idle retains a bounded `FW:` label from this MCU's `mcu_version`.
+Generic drawing firmware adds a host-composed 5x7 footer below Idle,
+including the compilation date as `YYYY-MM-DD` from the MCU's build
+identifier (`--` if unavailable). The Idle position and existing artwork
+are preserved; time and hostname are omitted. Without generic drawing,
+`TJC_IDLE_VERSION=1` retains the older C footer; older v5 firmware uses
+the model text slot for compact firmware identity while preserving the URL.
+No additional firmware update is required for the generic host footer.
 
 This extra is separate from `[lcd_status]`, which prepares job metadata.
+With `TJC_DRAW_VERSION=1`, the host in `lcd_job_layout.py` composes the
+static card from [newPrint_card.png](../Screenshots/newPrint_card.png).
+It has an orange/blue logo, model box, cyan metadata headings, filename,
+file target-temperature panels and `Press Knob to Pause` footer. The
+prepared 96x96 thumbnail is enlarged to 120x120 by scaling rectangle edges
+on the host, preserving its colors without a second image conversion.
+The header reads `PRINTING` in orange. A compact temperature panel and
+host-drawn nozzle with cooling fins/block/tip leave more room for the model.
+Host-defined degree rings avoid the panel's blank glyph.
+Bounded generic batches retain CRC/acknowledgement/final checkpoint checks;
+all batches finish before the first G-code. An invalid operation or failed
+batch prevents start. There is no drawing during printing or pause/resume.
+This layout needs only a host update when generic drawing is available.
+An explicit idle `LCD_RENDER` can recover a prior LCD error by requesting
+bounded initialization/clear before retrying the card. This does not
+restart Klipper or the MCU and does not operate heaters or motion. A failed
+reinitialization or missing acknowledgement still prevents drawing/start.
+Automatic print preparation does not silently recover a failed LCD.
+
+Older firmware uses the legacy v5 card described below.
 With `[lcd_status]` and its default `auto_prepare: True`, the host sends
 the prepared job in acknowledged 40-byte chunks before the first file
 G-code. The C renderer validates payload v5, lengths/offsets/CRC32, draws
@@ -5029,6 +5061,117 @@ is a protocol checkpoint, not a documented pixel-level panel render ACK.
 See [LCD_STATUS_PLAN.md](LCD_STATUS_PLAN.md) for staged testing and rollback.
 Do not add this section to a running installation before deploying the
 matching host module and MCU firmware.
+
+### [tjc_menu]
+
+Optional fork-specific knob menu for the stock Ender-3 V3 SE TJC display.
+Requires `[tjc_lcd]` and firmware advertising `TJC_DRAW_VERSION=1` under
+`CONFIG_TJC_LCD`. This initial firmware extension executes generic drawing
+operations; all menu definitions, coordinates, fonts, colors, and icons
+live in host modules. Later design changes do not require reflashing.
+Existing v5 idle and job-card rendering remains compatible.
+Enabling the section is required to register knob input; compiling the
+driver alone does not enable menus. The full setup uses this section with
+`[tjc_lcd]` and `[lcd_status]`, as in
+[sample-tjc-lcd.cfg](../config/sample-tjc-lcd.cfg).
+
+```
+[tjc_menu]
+encoder_pins: ^PA11, ^PA12
+#   Required quadrature input pins, with pull-ups on this board.
+#   Their order controls rotation direction. Source-confirmed in Marlin.
+click_pin: ^!PB1
+#   Required active-low knob switch, with pull-up on this board.
+#encoder_steps_per_detent: 4
+#   Quadrature transitions per step: 2 or 4. Default: 4.
+#debounce_delay: 0.025
+#   Stable switch time in seconds, from 0.005 to 0.1. Default: 0.025.
+```
+
+PA11/PA12 must not also be assigned to USB, CAN, or another device. The
+owner's working host link uses USART1 PA9/PA10; the LCD retains USART2
+PA2/PA3. Check production includes for pin conflicts before enabling.
+Keep GPIO button support enabled in the firmware build. No generic
+`[display]` section or host LCD serial port is used.
+
+Rotate in either direction from the visible idle screen to open Menu
+without executing an action. Once inside, clockwise rotation highlights
+the next entry down; counterclockwise rotation highlights the previous
+entry up. Click to enter a submenu or execute the highlighted action.
+A click while idle does not open the menu. Hold the knob for 0.8
+seconds to return to idle. More Moves opens six 10 mm movements and Back.
+The main menu's footer reads `Press&Hold Knob: Idle Screen`.
+Section headings are not selectable. Navigation is discarded while an
+action or drawing is busy. A filament cancel press is accepted as described
+below. Navigation draws have a fixed 200 ms cooldown after completion.
+Fast rotation updates one pending selection redraw; intermediate highlights
+are skipped, with no queue of old detents to replay. Drawing claims busy
+ownership before waiting for the G-code mutex. Action, pause and filament
+cancel presses do not use this navigation cooldown.
+Menu interaction is rejected during pre-print preparation, printing,
+and pause. The single printing-time exception is a stable knob press that
+executes the configured `PAUSE` command once, including macro overrides.
+`[pause_resume]` support is loaded automatically. Rotations and paused
+clicks are ignored; the knob never issues `RESUME`. The press must be new
+and belong to the current printing job; queued preflight/old-job clicks
+cannot pause a subsequent print. The callback acquires the G-code mutex
+and rechecks state before executing. It never sends LCD commands, including
+on errors. Resume through the usual host UI.
+A new print closes the menu before its job card is rendered.
+The print card remains static.
+
+Home All Axes uses the configured `G28` command, including overrides.
+Preheat sets bed 50 C and nozzle 170 C without waiting. Movement entries
+execute exactly 10 mm per click at 20 mm/s for XY and 2 mm/s for Z, subject
+to normal kinematic limits. They require homed axes and an in-range full
+destination; no automatic homing or shortened move is performed. Front is
+positive Y and Back is negative Y in printer coordinates, following the
+owner's physical direction correction for this bed-slinger.
+Successful Home, Preheat, and Movement actions keep the current menu and
+highlight without any LCD traffic. Home does not show a waiting screen.
+Switching between Menu and Movement replaces only the body; the shared
+orange/blue logo and wordmark (red K, white `lipper`) stay visible.
+Drawing compaction runs on the
+host, preserves painter order and untouched pixels, and requires no new
+MCU firmware.
+
+Load and Unload heat the active extruder to 240 C and wait, with a
+five-minute heating deadline. Load feeds 50 mm at F800 followed by 40 mm
+at F400. Unload purges 15 mm at F400 and retracts 90 mm at F800. Feedrates
+are mm/min, independent of G-code speed/flow overrides. Moves are split
+into at most 1 mm segments, waiting for each to finish before queuing the
+next; normal extrusion limits still apply and can reject a segment.
+The bed is unchanged. The nozzle target is set to zero
+after queued extrusion finishes, including cleanup after recoverable
+errors. G-code modes and extrusion coordinates are restored without
+returning XYZ to an earlier position. No parking move is added.
+
+The host-designed Load/Unload screen follows
+[load_unload.png](../Screenshots/load_unload.png) and displays current
+nozzle temperature, the operation state, and `Press to cancel`. The full
+artwork is sent once before heating. Changed temperature values refresh
+at most once per second during heating and extrusion; phase changes update
+immediately. Only the changed temperature/state regions are redrawn.
+There is no timer that continues refreshing outside the operation.
+
+A stable knob press cancels during heating, drawing, or extrusion, without
+requiring a long press. Input callbacks only set a cancellation flag; they
+never issue competing LCD requests or acquire the G-code mutex. An active
+graphics transaction or the already queued move of at most 1 mm finishes
+before cleanup; no later extrusion is submitted. Cancellation turns the
+nozzle heater off, restores G-code state, and returns to the main menu
+without an error. The release cannot activate another action. The new
+artwork/temperature/cancel behavior is host-only and needs no additional
+MCU update beyond `TJC_DRAW_VERSION=1`.
+
+An operation error is shown once; click to dismiss or rotate to navigate
+again. Printer actions and drawing are serialized with G-code execution.
+The owner confirmed the current appearance and corrected Y direction on
+this printer. Verify printer-specific homing macros, travel and extrusion
+settings before using actions on another installation. See the
+[setup guide](TJC_LCD_Setup.md) for commands, status, troubleshooting and
+rollback, or [sample-tjc-menu.cfg](../config/sample-tjc-menu.cfg) to add
+only the menu to an existing LCD configuration. Do not include both samples.
 
 ### [display_data]
 
@@ -5569,14 +5712,16 @@ Fork-specific, user-invoked calibration of `[bltouch] z_offset` using one
 existing named `[load_cell]`. Keep CR Touch as the primary `probe`; do not
 also configure `[load_cell_probe]`. The sensor backend and MCU analog-trigger
 support must be available in the installed firmware. No new C protocol is
-introduced. See [staged setup](AUTO_Z_OFFSET_PLAN.md) before enabling contacts.
+introduced. See [setup and limitations](AUTO_Z_OFFSET_PLAN.md).
 With two `probe_points`, AUTO_Z_OFFSET runs both supervised tests followed by
 calibration in one warm session. Separate test/calibration commands remain
 available. AUTO_Z_OFFSET includes full homing and mesh clear; the separate
 manual commands still require those preparation steps. Optional `[tjc_lcd]`
 uses a coordinate canvas to highlight each phase without full-screen redraws.
-It requires updated mainboard firmware with TJC_CANVAS_VERSION=1, but no panel
-firmware update. Drawing drains before measurement.
+It uses mainboard firmware with `TJC_CANVAS_VERSION=1` or the menu's existing
+`TJC_DRAW_VERSION=1`; drawing-only firmware reuses its generic executor
+without reflashing. No panel firmware update is needed. Drawing drains
+before measurement, and the calibration reserves the LCD against menus.
 
 ```ini
 [auto_z_offset]
@@ -5612,6 +5757,14 @@ force_safety_limit:
 #   band. Compression headroom must exceed trigger_force. Saved sensor
 #   calibration and reference_tare_counts are unchanged. Generic
 #   load_cell_probe retains its saved-reference safety behavior.
+#sample_retract_dist: 2
+#   Existing nozzle tap retraction distance in mm. Also bounds nozzle
+#   overtravel below each fresh CR Touch bed_z reference. Each approach
+#   passes this derived endpoint and maximum travel to the contact engine.
+#   Endpoints at/below native position_min or at/above travel clearance are
+#   rejected before the nozzle approach; no global-minimum fallback.
+#   This bounds travel on a missing trigger, not physical force or accuracy.
+#   Legacy local DEV test_* options are ignored and no longer required.
 #horizontal_move_z: 5
 #   Travel clearance in mm; must exceed the current probe Z offset.
 #travel_speed: 50
@@ -5634,6 +5787,11 @@ force_safety_limit:
 #   Maximum wait in seconds; must exceed temperature_stable_time.
 #offset_tolerance: 0.025
 #   Maximum spread in mm among paired offsets at each individual point.
+#   Also bounds disagreement between descending and ascending contact-model
+#   estimates within each tap, including the primary ascent result. This
+#   experimental consistency criterion is not an absolute accuracy bound.
+#   Missing/invalid diagnostic references or unsupported branches reject
+#   the pair after acquisition, without changing its stopping mechanism.
 #spatial_tolerance: 0.025
 #   Maximum range in mm among local medians. Must be positive
 #   and no greater than 0.025. Exceeding it retains the diagnostic report

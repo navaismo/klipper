@@ -10,6 +10,8 @@ MIN_POINTS = 3
 BASELINE_POINTS = 8
 THRESHOLD_SIGMA = 5.
 THRESHOLD_FLOOR_G = 1.
+DESCENT_WINDOWS = (.25, .5, 1., 2., None)
+ASCENT_WINDOWS = (1.5, 2., 3., 5.)
 FRAME_NAMES = ('before_probe', 'after_probe', 'after_workaround',
                'after_ascent')
 
@@ -238,6 +240,109 @@ def _branch(rows, fit, descending=False):
     return result
 
 
+def _window_fit(rows, fit, descending=False, reference=None):
+    if descending:
+        rows = list(reversed(rows))
+    total = len(rows)
+    indices, stride = _bounded_indices(total)
+    rows = [rows[i] for i in indices]
+    result = {'status': 'insufficient_samples', 'z': None,
+        'sample_count': total, 'analyzed_count': len(rows), 'stride': stride}
+    if len(rows) < 2 * MIN_POINTS:
+        return result
+    result['data_time_bounds_s'] = [min(r[0] for r in rows),
+                                    max(r[0] for r in rows)]
+    data = [(r[1], r[2]) for r in rows]
+    if any(b[1] < a[1] for a, b in zip(data, data[1:])):
+        result['status'] = 'non_monotonic_z'
+        return result
+    try:
+        if reference is not None and reference.get('status') == 'identified':
+            # Reuse the existing full-branch fit for exactly the same rows.
+            z, below, above, slope = (reference[k] for k in (
+                'z', 'loaded_count', 'free_count', 'force_slope_g_per_mm'))
+        else:
+            z, below, above, slope = fit(data)
+        if (number(z) is None or number(slope) is None or slope >= 0.
+                or not data[0][1] < z < data[-1][1]
+                or min(below, above) < MIN_POINTS):
+            result['status'] = 'unsupported_fit'
+            return result
+        baseline = sum(f - slope * min(p - z, 0.) for f, p in data) / len(data)
+        errors = [f - baseline - slope * min(p - z, 0.) for f, p in data]
+        loaded = [e for (f, p), e in zip(data, errors) if p <= z]
+        free = [e for (f, p), e in zip(data, errors) if p > z]
+        rms = lambda values: (sum(e*e for e in values) / len(values))**.5
+        residuals = [rms(errors), rms(loaded), rms(free)]
+        if (number(baseline) is None
+                or any(number(r) is None for r in residuals)):
+            result['status'] = 'non_finite_fit'
+            return result
+        result.update({'status': 'identified', 'z': z,
+            'loaded_count': below, 'free_count': above,
+            'force_slope_g_per_mm': slope, 'baseline_g': baseline,
+            'residual_rms_g': residuals[0],
+            'loaded_residual_rms_g': residuals[1],
+            'free_residual_rms_g': residuals[2]})
+    except Exception as exc:
+        result.update({'status': 'fit_error', 'error': str(exc)[:160]})
+    return result
+
+
+def _window_summary(windows):
+    valid = [w for w in windows if w.get('status') == 'identified']
+    distinct = set(tuple(w['data_time_bounds_s']) for w in valid)
+    zs = [w['z'] for w in valid]
+    return {'status': 'available' if len(distinct) >= 2
+            else 'insufficient_windows', 'windows': windows,
+        'valid_window_count': len(valid),
+        'distinct_window_count': len(distinct),
+        'max_z_variation_mm': max(zs) - min(zs) if len(distinct) >= 2 else None}
+
+
+def _unavailable_windows(reason):
+    return {'version': 1, 'diagnostic_only': True, 'status': reason,
+        'descent': _window_summary([]), 'ascent': _window_summary([]),
+        'branch_difference_mm': None, 'physical_contact_bias': 'unknown',
+        'absolute_accuracy_validated': False,
+        'interpretation': 'window_sensitivity_does_not_measure_absolute_bias'}
+
+
+def _window_sensitivity(descent_rows, ascent_rows, fit, trigger, start, end,
+                        descent, ascent, difference):
+    result = _unavailable_windows('unavailable')
+    down, up = [], []
+    for duration in DESCENT_WINDOWS:
+        lower = trigger - duration if duration is not None else None
+        selected = [r for r in descent_rows if lower is None or r[0] >= lower]
+        if lower is not None and (not descent_rows
+                                  or descent_rows[0][0] > lower):
+            entry = {'status': 'insufficient_window_coverage', 'z': None}
+        else:
+            entry = _window_fit(selected, fit, descending=True,
+                reference=descent if duration is None else None)
+        down.append(dict(entry, window_s=duration,
+                          time_reference='trigger_time'))
+    for duration in ASCENT_WINDOWS:
+        upper = start + duration
+        selected = [r for r in ascent_rows if r[0] <= upper]
+        if upper > end:
+            entry = {'status': 'insufficient_window_coverage', 'z': None}
+        else:
+            entry = _window_fit(selected, fit,
+                reference=ascent if len(selected) == len(ascent_rows) else None)
+        up.append(dict(entry, window_s=duration,
+                        time_reference='ascent_start_time'))
+    result['descent'], result['ascent'] = (_window_summary(down),
+                                          _window_summary(up))
+    available = sum(b['status'] == 'available'
+                    for b in (result['descent'], result['ascent']))
+    result.update({'status': 'available' if available == 2 else
+        'partial' if available else 'unavailable',
+        'branch_difference_mm': difference})
+    return result
+
+
 def _descent_threshold(rows):
     # This is a sampled force threshold, conditional on an unloaded prefix.
     result = {'status': 'insufficient_samples', 'z': None, 'time': None,
@@ -332,6 +437,20 @@ def build_report(samples, motion, lookup_z, fit, regression_z=None, error=None):
         ascent = _branch(ascent_rows, fit)
     comparable = (usable and quality['frame_state'] == 'consistent'
                   and descent['z'] is not None and ascent['z'] is not None)
+    sensitivity = _unavailable_windows(invalid_reason)
+    if usable and quality['frame_state'] == 'consistent':
+        try:
+            analysis_end = min(end, start + window) if window is not None \
+                else end
+            sensitivity = _window_sensitivity(descent_rows, ascent_rows, fit,
+                trigger, start, analysis_end, descent, ascent,
+                ascent['z'] - descent['z'] if comparable else None)
+        except Exception as exc:
+            sensitivity = _unavailable_windows('diagnostic_error')
+            sensitivity['error'] = str(exc)[:160]
+            warn('window sensitivity')
+    elif usable:
+        sensitivity = _unavailable_windows('inconsistent_coordinate_frame')
     forces = [(i, r[1]) for i, r in enumerate(rows) if r[1] is not None]
     peak = max(forces, key=lambda item: item[1])[0] if forces else 0
     timed = [(i, r[0]) for i, r in enumerate(rows) if r[0] is not None]
@@ -384,6 +503,7 @@ def build_report(samples, motion, lookup_z, fit, regression_z=None, error=None):
         'ascent_fit_z': ascent['z'],
         'fit_interpretation': 'model_estimate_not_exact_physical_contact',
         'descent': descent, 'descent_threshold': threshold, 'ascent': ascent,
+        'window_sensitivity': sensitivity,
         'estimates_comparable': comparable,
         'ascent_minus_descent_fit_mm': ascent['z'] - descent['z']
             if comparable else None,
@@ -402,6 +522,7 @@ def log_report(samples, motion, toolhead, lookup_z, fit, regression_z=None,
         logging.info('Load cell tap diagnostic: %s',
                      json.dumps(_json_safe(report), separators=(',', ':'),
                                 allow_nan=False))
+        return report
     except Exception:
         warn('report')
 

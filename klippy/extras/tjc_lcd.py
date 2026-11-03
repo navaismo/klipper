@@ -4,9 +4,11 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging
 try:
-    from . import lcd_transfer, lcd_canvas
+    from . import lcd_transfer, lcd_canvas, lcd_draw
+    from . import lcd_idle_layout, lcd_job_layout
 except ImportError:
-    import lcd_transfer, lcd_canvas
+    import lcd_transfer, lcd_canvas, lcd_draw
+    import lcd_idle_layout, lcd_job_layout
 
 JOB_ERRORS = {1: 'LCD is busy', 2: 'Invalid LCD payload/header/text',
               3: 'Unexpected LCD transfer offset',
@@ -40,6 +42,7 @@ class TJCLCD:
         self.generation = 0
         self.completion = None
         self.job_completion = self.job_expected = None
+        self.job_last_response = None
         self.job_token = 0
         self.job_filename = None
         self.rendered = False
@@ -47,6 +50,7 @@ class TJCLCD:
         self.idle_generation = 0
         self.render_completion = None
         self.render_kind = None
+        self.render_abort_cmd = None
         self.startup_idle_pending = False
         self.calibration_active = False
         self.calibration_stage = None
@@ -56,6 +60,7 @@ class TJCLCD:
         self.canvas_abort_cmd = None
         self.job_begin_cmd = self.job_chunk_cmd = None
         self.job_end_cmd = self.job_abort_cmd = None
+        self.draw_commands = None
         self.start_cmd = self.clear_cmd = None
         self.watchdog = self.reactor.register_timer(self._timeout)
         self.mcu.register_config_callback(self._build_config)
@@ -130,6 +135,17 @@ class TJCLCD:
                 'tjc_lcd_job_end oid=%c token=%u', cq=cq)
             self.job_abort_cmd = self.mcu.lookup_command(
                 'tjc_lcd_job_abort oid=%c token=%u', cq=cq)
+        if self.mcu.get_constants().get('TJC_DRAW_VERSION') == lcd_draw.VERSION:
+            self.mcu.register_serial_response(
+                self._handle_job_result,
+                'tjc_lcd_draw_result oid=%c token=%u offset=%hu'
+                ' state=%c error=%c', self.oid)
+            self.draw_commands = tuple(self.mcu.lookup_command(command, cq=cq)
+                for command in (
+                    'tjc_lcd_draw_begin oid=%c token=%u size=%hu crc=%u',
+                    'tjc_lcd_draw_op oid=%c token=%u offset=%hu data=%*s',
+                    'tjc_lcd_draw_end oid=%c token=%u',
+                    'tjc_lcd_draw_abort oid=%c token=%u'))
 
     def _handle_ready(self):
         self.connected = True
@@ -146,6 +162,7 @@ class TJCLCD:
         self.reactor.register_callback(initialize)
 
     def _handle_disconnect(self):
+        self.printer.send_event('tjc_lcd:invalidate')
         self.calibration_active = False
         self.startup_idle_pending = False
         self.connected = False
@@ -162,6 +179,7 @@ class TJCLCD:
         self.screen = None
 
     def _handle_reset_file(self):
+        self.printer.send_event('tjc_lcd:invalidate')
         self.idle_generation += 1
         if (self.state == 'rendering'
             and self.render_kind not in ('idle', 'canvas')):
@@ -173,7 +191,8 @@ class TJCLCD:
         # Cancel macros may reset the file after CANCEL_PRINT_BASE, or use
         # SDCARD_RESET_FILE alone. Replace the invalidated idle callback;
         # the G-code mutex and motion drain still precede all LCD traffic.
-        if self.connected and self.state == 'ready' and self.screen == 'job':
+        if (self.connected and self.state == 'ready'
+            and self.screen in ('job', 'menu')):
             self._schedule_idle(wait_moves=True)
 
     def _handle_finished(self, state):
@@ -181,6 +200,9 @@ class TJCLCD:
             self._schedule_idle(wait_moves=True)
 
     def _handle_idle_timeout(self, print_time):
+        menu = self.printer.lookup_object('tjc_menu', None)
+        if menu is not None and menu.is_active():
+            return
         if (not self.connected or self.state != 'ready' or self.screen == 'idle'
             or self.calibration_active):
             return
@@ -207,6 +229,9 @@ class TJCLCD:
                         return
                     sd = self.printer.lookup_object('virtual_sdcard', None)
                     if sd is not None and sd.preflight_pending:
+                        return
+                    menu = self.printer.lookup_object('tjc_menu', None)
+                    if menu is not None and menu.is_active():
                         return
                     self._check_idle()
                     if wait_moves:
@@ -261,13 +286,14 @@ class TJCLCD:
             self._fail(str(e))
             raise self.gcode.error('TJC LCD request failed: %s' % (e,))
 
-    def _start(self):
+    def _start(self, show_idle=True):
         self.idle_generation += 1
         self._check_idle()
+        self.printer.send_event('tjc_lcd:invalidate')
         if self.printer.get_start_args().get('debugoutput') is not None:
             self.state = 'idle'
             return
-        self.startup_idle_pending = True
+        self.startup_idle_pending = show_idle
         self._send(self.start_cmd, [self.oid], 'initializing',
                    self.startup_delay + 3 * self.handshake_timeout + 1.)
         self.rendered = False
@@ -281,6 +307,8 @@ class TJCLCD:
                 or self.state != 'rendering' or self.job_completion is None
                 or params['token'] != self.job_token):
                 return
+            self.job_last_response = (params['offset'], params['state'],
+                                      params['error'])
             if params['error'] or (params['offset'], params['state']) == (
                     self.job_expected):
                 self.job_completion.complete(params)
@@ -289,13 +317,21 @@ class TJCLCD:
     def _job_request(self, command, args, offset, state, deadline):
         self._check_idle(allow_rendering=True)
         self.job_expected = (offset, state)
+        self.job_last_response = None
         completion = self.job_completion = self.reactor.completion()
         try:
             command.send(args)
             response = completion.wait(min(deadline,
                                            self.reactor.monotonic() + 3.))
             if response is None:
-                raise self.gcode.error('No LCD job acknowledgement from MCU')
+                logging.warning('LCD acknowledgement timeout: kind=%s token=%d'
+                                ' expected=%s received=%s', self.render_kind,
+                                self.job_token, self.job_expected,
+                                self.job_last_response)
+                raise self.gcode.error(
+                    'No LCD job acknowledgement from MCU'
+                    ' (token=%d offset=%d state=%d)'
+                    % (self.job_token, offset, state))
             if response['error']:
                 raise self.gcode.error(JOB_ERRORS.get(response['error'],
                                                       'Unknown LCD job error'))
@@ -305,15 +341,55 @@ class TJCLCD:
             self.job_completion = self.job_expected = None
 
     def _abort_job(self):
-        command = self.canvas_abort_cmd if self.render_kind == 'canvas' \
-            else self.job_abort_cmd
-        if self.connected and not self.printer.is_shutdown() and command:
-            command.send([self.oid, self.job_token])
+        abort = self.render_abort_cmd
+        if (self.connected and not self.printer.is_shutdown()
+            and abort is not None):
+            abort.send([self.oid, self.job_token])
 
-    def render_job(self, job):
+    def can_interact(self):
+        try:
+            self._check_idle()
+        except self.gcode.error:
+            return False
+        sd = self.printer.lookup_object('virtual_sdcard', None)
+        pause = self.printer.lookup_object('pause_resume', None)
+        return (self.state == 'ready' and not self.calibration_active
+                and not (sd is not None and sd.preflight_pending)
+                and not (pause is not None and pause.get_status(
+                    self.reactor.monotonic())['is_paused']))
+
+    def render_drawing(self, operations):
+        if not self.can_interact():
+            raise self.gcode.error('LCD drawing requires an idle printer')
+        if self.draw_commands is None:
+            raise self.gcode.error(
+                'Host-designed LCD screens require TJC_DRAW_VERSION=1 firmware')
+        self.idle_generation += 1
+        self._render(lcd_draw.prepare(operations), 'menu',
+                     commands=self.draw_commands)
+
+    def render_job(self, job, recover=False):
         if self.printer.get_start_args().get('debugoutput') is not None:
             return
+        if recover:
+            sd = self.printer.lookup_object('virtual_sdcard', None)
+            if sd is not None and sd.preflight_pending:
+                raise self.gcode.error(
+                    'Manual LCD render requires idle printer')
+            if self.state == 'error':
+                # Only an explicit idle LCD_RENDER may retry initialization.
+                # Suppress the startup idle callback before drawing the card.
+                self._start(show_idle=False)
         self._handle_before_print(job['filename'])
+        if self.draw_commands is not None:
+            batches = lcd_draw.prepare_batches(lcd_job_layout.screen(job))
+            for index, transfer in enumerate(batches):
+                self._render(transfer, 'job', job['filename'],
+                             commands=self.draw_commands)
+                if index != len(batches)-1:
+                    self.rendered = False
+                    self.job_filename = self.screen = None
+            return
         self._render(job['transfer'], 'job', job['filename'])
 
     def render_idle(self):
@@ -321,12 +397,18 @@ class TJCLCD:
             return
         self._handle_before_print(None)
         version = self.mcu.get_status(self.reactor.monotonic()).get(
-            'mcu_version') or 'unknown'
-        footer = self.mcu.get_constants().get('TJC_IDLE_VERSION') == 1
-        self._render(lcd_transfer.prepare_idle(version, footer), 'idle')
+            'mcu_version')
+        if self.draw_commands is None:
+            footer = self.mcu.get_constants().get('TJC_IDLE_VERSION') == 1
+            transfer = lcd_transfer.prepare_idle(version or 'unknown', footer)
+            self._render(transfer, 'idle')
+            return
+        self._render(lcd_transfer.prepare_idle(), 'idle')
+        self._render(lcd_draw.prepare(lcd_idle_layout.firmware_footer(version)),
+                     'idle', commands=self.draw_commands)
 
     def begin_calibration(self, text, nozzle_target=None, bed_target=None):
-        if (self.canvas_begin_cmd is None or
+        if ((self.canvas_begin_cmd is None and self.draw_commands is None) or
             self.printer.get_start_args().get('debugoutput') is not None):
             return False
         self._handle_before_print(None)
@@ -372,8 +454,25 @@ class TJCLCD:
     def render_canvas(self, operations, clear=False, screen='calibration'):
         self._check_idle()
         if self.canvas_begin_cmd is None:
-            raise self.gcode.error('LCD partial drawing requires firmware '
-                                   'with TJC_CANVAS_VERSION=1')
+            if self.draw_commands is None:
+                raise self.gcode.error('LCD partial drawing requires firmware '
+                    'with TJC_CANVAS_VERSION=1 or TJC_DRAW_VERSION=1')
+            # Reuse installed generic drawing for calibration and diagnostics;
+            # menu firmware needs no new capability or assets for these views.
+            ops = [lcd_draw.clear(lcd_canvas.BACKGROUND)] if clear else []
+            for op in lcd_canvas.validate(operations):
+                if op[0] == 'rect':
+                    ops.append(lcd_draw.rectangle(op[5], *op[1:5]))
+                else:
+                    ops.append(lcd_draw.text(op[6].decode('gbk'), op[1], op[2],
+                                            op[4], op[5], op[3]))
+            if not ops:
+                return
+            batches = lcd_draw.prepare_batches(ops)
+            for transfer in batches:
+                self._render(transfer, 'canvas', commands=self.draw_commands)
+            self.screen = screen
+            return
         operations = lcd_canvas.validate(operations)
         self.job_token = (self.job_token+1) & 0xffffffff
         self.state = 'rendering'
@@ -381,6 +480,7 @@ class TJCLCD:
         self.rendered = False
         self.screen = self.job_filename = None
         self.render_kind = 'canvas'
+        self.render_abort_cmd = self.canvas_abort_cmd
         completion = self.render_completion = self.reactor.completion()
         deadline = self.reactor.monotonic() + 30.
         token = self.job_token
@@ -409,18 +509,23 @@ class TJCLCD:
             raise self.gcode.error('LCD canvas failed: %s' % (exc,))
         finally:
             self.render_completion = self.render_kind = None
+            self.render_abort_cmd = None
         self.state = 'ready'
         self.screen = screen
         completion.complete(True)
 
-    def _render(self, transfer, kind, filename=None):
+    def _render(self, transfer, kind, filename=None, commands=None):
         self._check_idle()
-        if self.job_begin_cmd is None:
+        if commands is None and self.job_begin_cmd is None:
             raise self.gcode.error(
                 'LCD rendering requires rebuilt firmware'
                 ' with TJC_JOB_VERSION=%d' % lcd_transfer.VERSION)
         # Validate before claiming the UART or changing the visible card.
-        chunks = list(lcd_transfer.iter_chunks(transfer))
+        chunks = (transfer['chunks'] if commands is not None
+                  else list(lcd_transfer.iter_chunks(transfer)))
+        begin, chunk, end = (commands[:3] if commands is not None else
+                            (self.job_begin_cmd, self.job_chunk_cmd,
+                             self.job_end_cmd))
         self.job_token = (self.job_token + 1) & 0xffffffff
         self.state = 'rendering'
         self.error = None
@@ -428,21 +533,23 @@ class TJCLCD:
         self.job_filename = None
         self.screen = None
         self.render_kind = kind
+        self.render_abort_cmd = (commands[3] if commands is not None
+                                 else self.job_abort_cmd)
         completion = self.render_completion = self.reactor.completion()
         deadline = self.reactor.monotonic() + 180.
         token = self.job_token
         try:
-            self._job_request(self.job_begin_cmd,
+            self._job_request(begin,
                               [self.oid, token, transfer['size'],
                                transfer['crc32']], 0, 1, deadline)
             for offset, data in chunks:
                 # The virtual-SD timer is still stopped throughout rendering.
                 if self.reactor.monotonic() >= deadline:
                     raise self.gcode.error('LCD job preparation exceeded 180s')
-                self._job_request(self.job_chunk_cmd,
+                self._job_request(chunk,
                                   [self.oid, token, offset, data],
                                   offset + len(data), 1, deadline)
-            self._job_request(self.job_end_cmd, [self.oid, token],
+            self._job_request(end, [self.oid, token],
                               transfer['size'], 2, deadline)
         except Exception as e:
             try:
@@ -453,6 +560,7 @@ class TJCLCD:
                 self._fail(str(e))
             completion.complete(False)
             self.render_completion = self.render_kind = None
+            self.render_abort_cmd = None
             raise self.gcode.error('LCD job render failed: %s' % (e,))
         self.state = 'ready'
         self.rendered = kind == 'job'
@@ -460,12 +568,14 @@ class TJCLCD:
         self.screen = kind
         completion.complete(True)
         self.render_completion = self.render_kind = None
+        self.render_abort_cmd = None
         logging.info('LCD %s screen rendered: %s', kind, filename)
 
     def _handle_before_print(self, filename):
-        self.idle_generation += 1
         if self.calibration_active:
             raise self.gcode.error('LCD is reserved for Auto Z-offset')
+        self.printer.send_event('tjc_lcd:invalidate')
+        self.idle_generation += 1
         if self.printer.get_start_args().get('debugoutput') is not None:
             return
         if self.state == 'idle':
@@ -473,7 +583,9 @@ class TJCLCD:
         completion = self.completion
         if completion is not None:
             completion.wait()
-        if self.render_kind == 'idle' and self.render_completion is not None:
+        while (self.state == 'rendering'
+            and self.render_kind in ('idle', 'menu')
+            and self.render_completion is not None):
             self.render_completion.wait()
         if self.state != 'ready':
             raise self.gcode.error('TJC LCD is not ready: %s'
@@ -525,6 +637,7 @@ class TJCLCD:
     cmd_TJC_LCD_CLEAR_help = 'Clear the LCD when the printer is idle'
     def cmd_TJC_LCD_CLEAR(self, gcmd):
         self._check_idle()
+        self.printer.send_event('tjc_lcd:invalidate')
         self.startup_idle_pending = False
         self.idle_generation += 1
         if self.state != 'ready':
@@ -553,6 +666,8 @@ class TJCLCD:
         x1 = gcmd.get_int('X1', minval=x0, maxval=239)
         y1 = gcmd.get_int('Y1', minval=y0, maxval=319)
         color = gcmd.get_int('COLOR', minval=0, maxval=65535)
+        self.printer.send_event('tjc_lcd:invalidate')
+        self.idle_generation += 1
         self.printer.lookup_object('toolhead').wait_moves()
         self.render_canvas([lcd_canvas.rect(x0, y0, x1, y1, color)],
                            screen='custom')

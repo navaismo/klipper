@@ -3,7 +3,9 @@
 # Copyright (C) 2017-2026  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
+import collections
 import logging
+import math
 import pins
 from . import manual_probe
 
@@ -242,6 +244,25 @@ class HomingViaProbeHelper:
             raise pins.error("Can not pullup/invert probe virtual endstop")
         return self
 
+class ProbeSessionBounds(collections.namedtuple('ProbeSessionBounds',
+        'minimum_z maximum_descent deploy_minimum_z')):
+    """Explicit toolhead-frame limits owned by one bounded probe session."""
+    __slots__ = ()
+    def target_z(self, printer, start_z, global_minimum):
+        values = self + (start_z, global_minimum)
+        if (any(v is None or math.isnan(v) or math.isinf(v) for v in values)
+                or self.maximum_descent <= 0.):
+            raise printer.command_error("Invalid probe session bounds")
+        target = max(global_minimum, self.minimum_z,
+                     start_z - self.maximum_descent)
+        if target >= start_z:
+            raise printer.command_error("Probe bounds prevent descent")
+        return target
+    def check_deploy(self, printer, z):
+        if (math.isnan(z) or math.isinf(z) or z < self.deploy_minimum_z):
+            raise printer.command_error("Insufficient deployed probe clearance")
+
+
 # Support for probes that trigger via mcu_endstop
 class DescendToEndstopHelper:
     def __init__(self, config, mcu_probe, probe_offsets, param_helper,
@@ -254,10 +275,12 @@ class DescendToEndstopHelper:
         self.z_min_position = lookup_minimum_z(config)
         self.results = []
         LookupZSteppers(config, self.mcu_probe.add_stepper)
-    def descend_until_trigger(self, gcmd):
+    def descend_until_trigger(self, gcmd, descent_bounds=None):
         toolhead = self.printer.lookup_object('toolhead')
         pos = toolhead.get_position()
-        pos[2] = self.z_min_position
+        pos[2] = (self.z_min_position if descent_bounds is None else
+                  descent_bounds.target_z(self.printer, pos[2],
+                                           self.z_min_position))
         speed = self.param_helper.get_probe_params(gcmd)['probe_speed']
         phoming = self.printer.lookup_object('homing')
         check_movement = (self.always_check_movement
@@ -324,6 +347,7 @@ class SampleAveragingHelper:
         self.nozzle_probe = nozzle_probe
         # Session state
         self.hw_probe_session = None
+        self.descent_bounds = None
         self.results = []
         # Register event handlers
         self.printer.register_event_handler("gcode:command_error",
@@ -337,10 +361,11 @@ class SampleAveragingHelper:
     def _probe_state_error(self):
         raise self.printer.command_error(
             "Internal probe error - start/end probe session mismatch")
-    def start_probe_session(self, gcmd):
+    def start_probe_session(self, gcmd, descent_bounds=None):
         if self.hw_probe_session is not None:
             self._probe_state_error()
         self.hw_probe_session = self.start_session_cb(gcmd)
+        self.descent_bounds = descent_bounds
         self.results = []
         return self
     def end_probe_session(self):
@@ -349,6 +374,7 @@ class SampleAveragingHelper:
             self._probe_state_error()
         self.results = []
         self.hw_probe_session = None
+        self.descent_bounds = None
         hw_probe_session.end_probe_session()
     def _probe(self, gcmd):
         toolhead = self.printer.lookup_object('toolhead')
@@ -356,7 +382,11 @@ class SampleAveragingHelper:
         if 'z' not in toolhead.get_status(curtime)['homed_axes']:
             raise self.printer.command_error("Must home before probe")
         try:
-            self.hw_probe_session.run_probe(gcmd)
+            if self.descent_bounds is None:
+                self.hw_probe_session.run_probe(gcmd)
+            else:
+                self.hw_probe_session.run_probe(
+                    gcmd, descent_bounds=self.descent_bounds)
             epos = self.hw_probe_session.pull_probed_results()[0]
         except self.printer.command_error as e:
             reason = str(e)

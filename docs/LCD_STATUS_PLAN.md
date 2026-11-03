@@ -1,7 +1,498 @@
 # LCD print-status project: Ender-3 V3 SE + Klipper
 
 ## Objective
-Reuse the printer's original LCD **without physically disconnecting it** while Klipper runs. It is a **read-only, static** display. No touch, menus, or printer control in v1.
+Reuse the printer's original LCD **without physically disconnecting it**
+while Klipper runs. Print information stays static. The current setup also
+supports host-designed idle knob menus and a single printing-time `PAUSE`
+press. The original v1 scope excluded menus; that historical restriction
+is superseded by the owner-approved work below.
+
+## Current setup and hardware confirmation (2026-11-02)
+
+The owner confirmed the finished appearance and supplied
+[IdleV7.jpg](../Screenshots/IdleV7.jpg),
+[Menu1.jpg](../Screenshots/Menu1.jpg),
+[Menu2.jpg](../Screenshots/Menu2.jpg),
+[PrintPage1.jpg](../Screenshots/PrintPage1.jpg) and
+[PrintPage2.jpg](../Screenshots/PrintPage2.jpg). These are the current
+README photos: Idle with MCU revision/date, both knob menus and two cards
+with 120x120 displayed thumbnails, orange `PRINTING`, compact temperatures
+and `Press Knob to Pause`. The main menu reads
+`Press&Hold Knob: Idle Screen`. Photos establish appearance, not measured
+rendering time or print-quality impact.
+
+Use [TJC_LCD_Setup.md](TJC_LCD_Setup.md) for the current installation,
+capability checks, dependencies, three-section configuration, controls,
+commands, recovery and rollback. [sample-tjc-lcd.cfg](
+../config/sample-tjc-lcd.cfg) is the complete configuration snippet.
+The sections below retain architecture and validation history; earlier
+layouts, proposals and pending-validation statements describe their stage.
+
+## Host-owned designs and idle-only menu proposal (2026-11-02)
+
+Status: the owner approved this architecture on 2026-11-02. The optional
+idle-only menu is implemented in the development checkout. The original
+static stage and historical C-owned layouts below describe existing code.
+All new screen designs live on the host. The current appearance is now
+owner-confirmed as described above; deployment to another printer and
+hardware timing validation remain separate steps.
+
+### Host print card and printing-time pause exception (2026-11-02)
+
+The owner requested `Screenshots/newPrint_card.png`, replacing its footer
+with `Press Knob to Pause`, and explicitly authorized a single printing-time
+UI action: a debounced knob press executes the configured `PAUSE` command.
+This supersedes the historical blanket input exclusion while retaining
+the no-refresh/no-LCD-traffic rule. Rotation remains ignored while printing;
+paused presses do nothing and never issue `RESUME`. The menu stays closed.
+
+`tjc_menu.py` loads the public `pause_resume` object and snapshots press
+eligibility, generation and card filename at the raw switch transition.
+Debounce accepts only a fresh printing press. A single queued callback
+acquires the G-code mutex and rechecks the current job, print state,
+preflight and pause state before running `PAUSE`. The normal macro/base
+command handles all pause behavior. No parking, heater control or motion
+is added by this input. Held/bouncing switches cannot repeat it. Reset,
+disconnect, shutdown, changed jobs and preflight events invalidate stale
+presses. Errors go to the console/status, never an LCD error screen.
+
+`lcd_job_layout.py` owns the 240x320 composition, colors, geometry, text,
+filename wrapping, icons and thumbnail placement. Following physical
+feedback, the model scales prepared 96x96 RGB565 rectangle edges to
+120x120 at x10/y54, retaining their colors and operation count without a
+second image conversion. This replaces the initial 64x64 fitting and the
+subsequent 96x96 and 104x104 displays. The header reads `PRINTING` in orange.
+The model frame is x8/y44..x132/y177, with its label above the image;
+metadata moves to x140 in a narrower column, preserving large hour counts with
+the host's small font when needed. The temperature panel shrinks from
+84 to 54 pixels high, with smaller values, labels beside the icons and
+a nozzle drawn with heat-break stem, fins, heater block and tapered tip.
+Black source pixels remain skipped and all nonblack RGB565 pixels are
+preserved exactly. Labels use the host's shared 5x7 font; values
+and filenames use existing panel fonts. Temperatures remain static file
+targets, unknown is `--` and zero means off; host degree rings avoid the
+blank panel glyph. Metadata, basename extension rules and total duration
+formatting remain unchanged. There are no live heater reads or progress
+updates in this card. Idle and its firmware/date footer are unchanged.
+
+On `TJC_DRAW_VERSION=1`, `render_job()` uses generic drawing batches from
+`lcd_draw.prepare_batches()`. All operations and all batches are prepared
+and validated before transmission. Each batch is <=16000 bytes with one
+bounded operation per acknowledged message, its own CRC and final protocol
+checkpoint. No MCU code, assets, protocol version, buffer or pacing change
+is needed. Text/geometry/thumbnail failures prevent starting; a transfer
+failure aborts the correct generic executor and leaves the LCD error gate.
+Card success is published only after the final batch. The virtual SD work
+timer starts after the entire render returns; pause/resume never calls it.
+Only old firmware without generic drawing retains the legacy v5 card.
+The prepared v5 metadata descriptor remains available for diagnostics,
+but does not describe generic-card on-wire byte counts.
+
+Native C tests compare the composed and compacted card, including text-only
+and thumbnail variants. Host tests cover complex multi-batch thumbnails,
+GBK filename wrapping, unknown/zero targets, late validation errors before
+any UART claim, failure gating and static pause behavior. Button tests
+cover fresh vs preflight/old-job presses, hold/bounce, callback invalidation,
+macro errors without LCD traffic and the actual `PauseResume` helper.
+The native-frame preview `/tmp/klipper-new-print-card-preview.png` uses
+approximate host fonts; it is not a physical panel photo or timing result.
+No production config, service, firmware, heater, motion or print state was
+changed by the agent. Deploy host files and reload only when idle. Rollback
+requires the previous matching host files; MCU firmware stays unchanged.
+
+The owner subsequently reported `LCD_RENDER` was blocked by a prior
+missing acknowledgement. Read-only logs confirm two successful manual
+cards, followed by one chunk acknowledgement timeout and a later request
+rejected before transfer because the LCD remained in `error`. The cause
+of the original missing MCU response is not established by that log.
+Manual `LCD_RENDER` now opts into recovery: if idle and in error, request
+bounded startup handshake/clear with `startup_idle_pending=False`, wait
+for readiness, then draw the card. No idle callback may race the card.
+The automatic print hook does not opt in and still refuses an errored LCD.
+No timeout is accepted as success. Manual failures use `LCD_RENDER failed`,
+and acknowledgement timeout diagnostics include token/expected offset/state
+and the last received offset/state/error. Tests cover failed and successful
+recovery, no G-code/motion/heat/print-start commands, and printing/paused/
+preflight exclusion. No live LCD command or service restart was performed
+by the agent for this fix.
+
+### Persistent menus, reference branding and host compaction (2026-11-02)
+
+The owner physically observed redraws after every action and requested
+that successful Home, Preheat and Movement clicks execute in place.
+`tjc_menu.py` now keeps its drawn-page state after these actions, removes
+the Homing/wait screen, and redraws after filament operations because they
+replace the visible page. Errors still show one dismissible message.
+Coalesced rotations that return to the current selection send nothing.
+Menu/Movement transitions clear only y50..319 and retain the shared header;
+its wordmark at y26 ends before that boundary. Both menus and filament
+screens share the owner's reference colors: orange nozzle faces over blue
+wings, a red K (`0xf920`) and white `lipper`. The supplied photo corrects
+and supersedes the earlier all-red request. Geometry, font choices and
+colors remain host-owned, with no firmware change.
+The main menu footer reads `Press&Hold Knob: Idle Screen` at y292,
+centered in the existing panel font (216 pixels wide).
+
+Following the owner's report of rapid knob turns making the UI unresponsive,
+navigation now waits at least 200 ms after each completed redraw. A single
+deferred callback retains only the latest selection; it skips intermediate
+highlights and never replays a detent backlog. The callback claims busy
+ownership before acquiring the G-code mutex, so input arriving during that
+wait cannot queue more work. Rotations during drawing/actions and stale
+captured input are discarded. Generation and request identity invalidate
+old deferred work without releasing a newer request. Action, print-pause
+and filament-cancel clicks do not use this navigation cooldown. Host tests
+exercise sustained/burst rotation, cooldown timing, mutex-yield input,
+invalidation and unchanged action/pause/cancel response. This is a host-only
+traffic bound; physical freeze reproduction and panel timing remain untested.
+
+`lcd_draw.py` validates the original bounded stream before compaction.
+For each consecutive rectangle pass, a bounded host-only scratch raster
+records final colors and untouched pixels. Equal-color runs merge in both
+orientations; the smaller result competes with compacted consecutive color
+layers and the original stream. Only a reduction in operations is used.
+Clear and text remain ordering barriers. Background-colored paint is
+retained, and unpainted pixels are never filled. No panel font rasterization,
+MCU framebuffer, command, firmware version, pacing, or acknowledgement
+change is involved. The scratch raster is at most 240x320 signed integers
+on the host and is discarded after preparation; it is never transferred.
+
+The filament composition retains the spool, hotend, direction arrow,
+temperature, phase and cancellation control, with simpler spool ribs,
+rectangular corner strokes and compact two-color logo wings. Representative
+170 C full-page transfers compare as follows:
+
+| Screen | Previous operations | Current operations | Current bytes |
+| --- | ---: | ---: | ---: |
+| Menu | 232 | 134 | 1578 |
+| Movement | 216 | 155 | 1817 |
+| Load | 706 | 338 | 3762 |
+| Unload | 706 | 338 | 3764 |
+
+Load/Unload send about 52% fewer operations. These are measured host
+transfer counts, not physical LCD time measurements. Native C tests
+compare original and compacted final pixels, including text envelopes,
+while randomized host tests cover overlap, transparency and bounds.
+Successful repeated action tests assert zero LCD calls and preserved
+selection; filament cancellation, heater cleanup, print exclusion and
+travel-limit tests remain passing. No firmware build, production edit,
+printer command or service restart was performed. Apply through a host
+reload when idle. To undo this refinement, restore the previous matching
+host menu/layout/drawing modules; MCU firmware remains unchanged.
+
+### Idle identification and menu activation diagnostics (2026-11-02)
+
+Every idle render retains the connected LCD MCU's firmware revision from
+`mcu.get_status()['mcu_version']`. At the owner's request, the host in
+`lcd_idle_layout.py` retains the compilation date as `YYYY-MM-DD`, omits
+the time/hostname and centers a small `FW:` line below Idle at y309..315.
+For example: `FW: 3ae38934-dirty 2026-11-02`. The host owns the 5x7 glyphs
+and merges their pixel runs into generic rectangles. The label is at most
+29 characters, preserving the existing Idle text at y282 and avoiding the
+bottom corner artwork. The date is parsed from the connected MCU's build
+identifier and validated as a calendar date; missing/invalid dates show
+`--`, never the host's date or source file modification time.
+The original v5 artwork is sent unchanged before the generic footer.
+No new MCU code or firmware update is required. Legacy v5
+without generic drawing includes a shorter `FW:` revision in its existing
+20-byte Idle indicator slot. An unavailable revision shows `FW: --`.
+Printing waits for both transactions; a footer failure aborts the generic
+protocol and leaves the normal LCD error gate in place. There is no
+periodic firmware/version polling or printing-time redraw.
+
+The owner reported no knob response before adding `[tjc_menu]`. That
+section is required to register the host buttons. After enabling it, the
+owner reported the missing `TJC_DRAW_VERSION=1` error. The remote-built
+`out/klipper.bin` inspected at this point is 52940 bytes, SHA256
+`0ba718ed34056d81dfc9096e98f27c22248c83c2863f2969a08337917bc359f5`.
+Its dictionary reports `3ae38934-dirty-20261102_182347` (hostname omitted),
+`TJC_DRAW_VERSION=1`, job version 5, buttons, USART1 at 250000 baud and
+LCD USART2 at 115200 baud. The embedded compressed dictionary was also
+decoded directly from the bin, which matches the ELF binary output.
+Read-only inspection through the owner's configuration/log mount
+subsequently confirmed the runtime mismatch. The latest connection in
+`logs/klippy.log` reports `43fc76cb-dirty-20261030_080230` (hostname omitted),
+158 commands, canvas/idle version 1 and job version 5, without
+`TJC_DRAW_VERSION`. The owner reported flashing by SD as `vlcd.bin`, but
+the board was still running the older build; the reason the SD update did
+not install the inspected binary was not established. The owner then
+confirmed the firmware/menu works after repeating deployment.
+
+Klippy runs from the DEV checkout, using the DEV data directory's
+`config/printer.cfg`. That configuration
+includes `[tjc_menu]` with the expected PA11/PA12/PB1 pins. No host path
+or pin correction is indicated by this error. The host error now includes
+the connected MCU's version and advertised capability. No production
+configuration, service, or firmware was changed by the agent.
+
+### Load/Unload screen and cancellation (2026-11-02)
+
+The owner requested `Screenshots/load_unload.png` for both filament actions,
+replacing its stop caption with `Press to cancel`. The host layout now
+composes the logo, cyan borders/separators, spool, filament path, hotend,
+direction arrow, operation title, current nozzle temperature, phase, and
+cancel affordance in 240x320. Degree rings are host drawing primitives
+because the physical panel's degree glyph is unreliable. Only the host
+layout/controller and documentation change; the existing generic MCU
+drawing contract and firmware remain unchanged.
+
+The full artwork is sent before heating. During the idle filament action,
+changed current nozzle temperatures refresh at most once per second from
+the existing heater object's `get_temp()` reading. Only temperature and
+phase regions change. Heater waiting yields every 250 ms, and phase
+changes update immediately. There is no persistent LCD refresh timer;
+the operation owns the refresh loop, which stops on completion, cancel,
+error, reset, shutdown, or disconnect. The static printing/paused card and
+its file-derived targets are unchanged.
+
+A debounced knob press requests cancellation even while the action is
+busy heating, moving, or drawing. Input callbacks only set a flag and
+never acquire the G-code mutex or send graphics. The running drawing
+transaction finishes before the flag is acted on. Cancellation during
+initial artwork prevents heating entirely. Extrusion is submitted one
+segment of at most 1 mm at a time, with `wait_moves()` after each; a cancel
+can therefore leave only that one segment to finish, not the entire
+50/40/15/90 mm sequence. Cleanup drains motion, sets the nozzle target to
+zero, restores G-code state, and returns to the main menu with the original
+filament item highlighted. A held switch or its release cannot restart
+the action. Cancellation is not an action error. The physical reaction
+time and average feed rate with short segments still require hardware
+validation; the requested F800/F400 feedrates are retained.
+
+Native tests reconstruct the actual generic C frames for both new screens,
+including unknown/zero temperatures. Host tests cover partial/capped
+temperature refresh through heating and extrusion, press bounce and stale
+events, cancellation before heating and during load/unload, one-segment
+queueing, cleanup ordering, release suppression, and preflight exclusion.
+The preview `/tmp/klipper-filament-preview.png` uses these native frame
+traces and approximate host fonts; it is not a physical panel photograph.
+
+### Implementation and generic drawing contract
+
+`klippy/extras/tjc_menu_layout.py` contains all menu designs, icon row masks,
+coordinates, colors, font choices, and labels. `tjc_menu.py` owns input,
+navigation, serialization, and heater/motion actions. `lcd_draw.py` packs
+and validates semantic drawing operations; `tjc_lcd.py` streams them using
+the existing LCD ownership and completion handling. `src/tjc_draw.c` is
+the generic executor. No menu names, assets, coordinates, or printer-action
+identifiers are compiled into it. `config/sample-tjc-menu.cfg` enables the
+optional module using the source-confirmed knob pins.
+
+The additive capability is `TJC_DRAW_VERSION=1`; startup remains version 1
+and static jobs remain version 5. Without `[tjc_menu]`, no knob GPIOs are
+claimed and the static integration continues to work. An enabled menu
+rejects firmware without the new capability during connection.
+
+| Message | Purpose |
+| --- | --- |
+| `tjc_lcd_draw_begin oid=%c token=%u size=%hu crc=%u` | Claim the initialized LCD for a drawing of 1..16000 operation bytes |
+| `tjc_lcd_draw_op oid=%c token=%u offset=%hu data=%*s` | Validate and execute one complete operation of at most 40 bytes |
+| `tjc_lcd_draw_end oid=%c token=%u` | Validate total size/CRC and perform the final protocol checkpoint |
+| `tjc_lcd_draw_abort oid=%c token=%u` | Release the drawing timer and UART |
+| `tjc_lcd_draw_result oid=%c token=%u offset=%hu state=%c error=%c` | Correlated acknowledgement or terminal result |
+
+Operations use big-endian words: clear is opcode 1 plus RGB565 color;
+filled rectangle is opcode 2 plus color/x0/y0/x1/y1; text is opcode 3,
+one-byte font, color/background/x/y words, followed by nonempty GBK text.
+Fonts 1 (8x16) and 3 (12x24) are supported. Text width counts GBK bytes as
+display cells. The MCU independently checks printable GBK, font support,
+240x320 bounds, offsets, lengths, tokens, and the final CRC32. No arbitrary
+LCD opcode or raw UART payload can be submitted through this interface.
+
+One operation is outstanding at a time. Its acknowledgement follows UART
+draining (and a 50 ms interval after clear). Drawing retains the existing
+16 ms pause after ten frames, a 5-second MCU inactivity deadline, a
+3-second host acknowledgement deadline, and a 180-second overall limit.
+The final handshake and 50 ms settling precede timer/UART shutdown and
+success. This is a protocol checkpoint, not a pixel-level panel ACK.
+Partial output can be visible before a CRC error. Invalid input never
+authorizes a printer action. Selection-only updates use eight rectangles;
+whole-page artwork is only sent on page/message transitions.
+
+Host actions hold the G-code mutex. Heater waiting yields to the reactor
+with a five-minute deadline. Only the active idle filament screen refreshes
+changed temperature values, at most once per second. Filament moves use
+public `toolhead.manual_move()` with at most 1 mm per segment,
+preserving normal extruder checks. `SAVE_GCODE_STATE` and
+`RESTORE_GCODE_STATE` preserve modes and E coordinates without a return
+move. G-code speed/flow factors do not alter the requested manual feedrates.
+Any stricter configured extrusion limit can reject a segment. Error
+cleanup drains pending motion and attempts nozzle target zero in a
+`finally` path. A failed action shows one static message; click dismisses
+it without repeating the action. Preheat targets remain active as requested.
+
+The initial generic extension requires one matching firmware update; all
+subsequent changes to these menu layouts are host-only. The existing
+physically confirmed idle/card layouts are retained for compatibility.
+
+### Development validation
+
+All 207 focused host/native-C tests pass on the x86_64 development machine.
+They include actual Marlin-compatible quadrature sequences and bounce,
+coalesced/partial drawing, every menu action, heater/motion cleanup,
+real G-code state restoration with speed/flow overrides, preflight/pause
+exclusion, reset while drawing or draining motion, and the generic C
+executor's frames, GBK/bounds/CRC/timeout/rollover behavior. The existing
+static LCD tests remain passing. Run from the repository root:
+
+```
+python3 -B -m unittest discover -s test/unit -p 'test_*.py'
+```
+
+These local checks used Pillow 13.0.0 under
+`PYTHONPATH=/tmp/klipper-menu-test-deps`; only that temporary development
+dependency directory was installed. Full Klippy import checking remains
+blocked by missing `greenlet` in the local Python environment. The host
+regression suite was not run because the required dictionary collection
+is unavailable in `dict/` or `ci_build/dict/`. Mocks do not establish
+physical timing, knob behavior, or heater/motor behavior.
+
+The STM32F103 build succeeds with an unchanged copy of the existing
+`.config`: 72 MHz, 8 MHz crystal, 28 KiB bootloader, USART1 PA9/PA10 at
+250000, LCD USART2 PA2/PA3 at 115200. The vector table is at `0x08007000`
+and the initial stack is `0x20005000`. The dictionary advertises
+`TJC_LCD_VERSION=1`, `TJC_JOB_VERSION=5`, and `TJC_DRAW_VERSION=1`.
+The binary is 52008 bytes. A same-configuration build excluding only
+`tjc_draw.c` is 50088 bytes: about 1.9 KiB additional flash. Static BSS
+increases from 3040 to 3128 bytes (+88); the drawing state is 84 bytes,
+plus its wake flag and alignment. There is no menu asset table or
+framebuffer in this extension. Stack temporaries remain bounded.
+
+Development firmware and its SHA256/configuration manifest are in
+`/tmp/klipper-menu-build/klipper.bin` and `manifest.json`, with
+`deployed: false`. `/tmp/klipper-menu-preview.png` shows both layouts from
+actual C frame traces with an approximate host font; it is not a panel
+photograph or pixel-exact font simulation. Source whitespace and scoped
+Git diff checks pass. Production files, services, and hardware were not
+changed. For rollback, disable `[tjc_menu]` at an authorized reload or
+restore the saved matching host/firmware pair.
+
+### Mandatory ownership rule
+
+All designs, layout coordinates, colors, font choices, labels, icons,
+artwork, and menu definitions belong in host files. A visual change must
+not require an MCU reflash. Do not add screen-specific layouts or menu
+assets to C firmware. Keep MCU flash and RAM use bounded, without a
+framebuffer or a resident menu tree.
+
+The C MCU driver retains USART2 ownership, handshake, LCD frame
+construction, validation, pacing, generic drawing execution, and
+completion reporting. Host Python supplies semantic drawing operations
+through Klipper's existing MCU link; it never opens an LCD serial port
+or sends arbitrary raw UART frames. This refines design ownership while
+preserving the confirmed physical communication path.
+
+The current firmware exposes initialization, clear, and fixed v5 job/idle
+layouts; it has no host-facing generic drawing interface. Source review
+therefore identifies a necessary initial firmware extension for arbitrary
+host-designed menus. Add a small generic operation interpreter, not a
+menu-specific renderer. Subsequent menu and design changes use host files
+only. Keep existing v5 jobs compatible; do not silently migrate or alter
+the confirmed idle/card appearance or thumbnail transport. Any later
+migration of those existing layouts to host definitions needs a scoped
+patch and visual regression checks.
+
+### Source-confirmed input and proposed integration
+
+The active local Marlin configuration enables `DWIN_CREALITY_LCD` with
+`BOARD_CREALITY_V3_GD303`. Its
+`Marlin/src/pins/stm32f1/pins_CREALITY_V3_GD303.h` assigns encoder A to
+PA11, encoder B to PA12, and click to PB1. The common DWIN encoder source
+configures pull-ups; `Configuration.h` selects four transitions per step.
+These are source findings, not a new physical knob test. The confirmed
+Klipper host link uses USART1 PA9/PA10, leaving LCD USART2 PA2/PA3 intact.
+The production configuration and includes remain unavailable for checking
+other uses of the three encoder pins.
+
+Use Klipper's existing `buttons` MCU acquisition and host rotary decoder.
+A new optional `klippy/extras/tjc_menu.py` owns navigation and actions.
+Host layout definitions generate bounded text/rectangle operations from
+the reference image, adapted to the panel's logical 240x320 resolution.
+Reuse existing driver arbitration through a public host interface; add
+no direct host serial dependency or generic `[display]` configuration.
+Existing GPIO sampling continues independently of LCD UART traffic;
+discard knob events during printing and pause.
+
+The generic drawing extension should support bounded clear, filled
+rectangle, and positioned GBK text operations, with host-chosen colors
+and supported fonts. These also compose icons and selection outlines.
+Use version/capability checks, correlated transaction tokens, bounded
+chunks, length/coordinate/font validation, CRC, timeouts, and final
+completion. Preserve UART pacing and stop its operation timer/UART after
+drawing. Coalesce navigation redraws and update only changed regions.
+Firmware must not receive printer-action identifiers or execute motion
+or heater commands from graphics data.
+
+### Navigation and actions
+
+The first detent in either direction opens the main menu only when
+Klipper is ready and the visible screen is idle. It highlights Home
+without executing it. Once inside, clockwise rotation highlights the
+next entry down; counterclockwise rotation highlights the previous entry
+up. A debounced click enters a submenu or executes the highlighted
+action. Clicking while idle does not open the menu.
+Back in the movement page returns to the main menu; a long press returns
+to idle when no action is running. Holding or releasing a long press
+must not also activate a row. Section headings are not selectable.
+
+| Page/item | Proposed action |
+| --- | --- |
+| Home All Axes | Execute the configured `G28` path, retaining homing overrides |
+| Load Filament | Heat nozzle to 240 C; load 50 mm at F800, then 40 mm at F400 |
+| Unload Filament | Heat nozzle to 240 C; purge 15 mm at F400, then retract 90 mm at F800 |
+| Preheat - B50, N170 | Set bed to 50 C and nozzle to 170 C, without waiting |
+| More Moves... | Open the six movement entries and Back |
+| Move Z Up / Down | One +10 / -10 mm Z move per click |
+| Move X Left / Right | One -10 / +10 mm X move per click |
+| Move Y Front / Back | One +10 / -10 mm Y move per click, following the owner's physical direction correction |
+
+The owner accepted these filament distances and mm/min feedrates.
+Wait for 240 C before extrusion, retain Klipper's heater/extrusion safety
+checks, and split long extrusion into short moves that respect configured
+limits. Wait for physical completion before setting the nozzle target to
+zero. Also attempt heater-off cleanup on a recoverable operation error;
+shutdown retains Klipper's normal safety handling. Preserve G-code modes
+and extrusion coordinates. Do not change the bed target during filament
+operations. No automatic homing or parking is added to these actions.
+
+Manual axis moves require the affected axes to be homed and the complete
+10 mm destination to be in range. Reject invalid moves with an error;
+do not bypass limits, clamp into a shorter move, or home automatically.
+Use conservative manual speeds within configured limits. The physical
+front/back convention still needs validation during an authorized test.
+
+Acquire the G-code mutex and recheck state before rendering or acting.
+Drain queued motion before drawing. Keep actions mutually exclusive;
+discard navigation received while an action is busy rather than replaying
+it later. A filament cancel press is accepted while busy. Only that idle
+filament screen refreshes current nozzle temperature; other busy/error
+messages remain static.
+Suppress automatic idle redraws while the menu owns the screen.
+
+Pre-print preparation must invalidate pending input/redraw callbacks and
+finish any in-flight drawing before the job card. A filament operation
+holds serialization through motion completion and heater-off cleanup,
+so a print cannot interleave with it. Reject interaction during active
+or paused prints and preflight, including after a callback yields.
+Disconnect/reset invalidates stale work. No LCD traffic occurs during
+printing or pause; the existing static job-card lifecycle remains intact.
+
+### Validation and deployment boundary
+
+Before deployment, use fake printer/heater/motion objects and native C
+transport harnesses to check input bounce/direction, one action per click,
+GBK and coordinate bounds, partial redraws, chunk/CRC/timeouts, exact
+filament distances/feedrates, heater-off ordering/error cleanup, homing
+and travel limits, and print/preflight/pause/reset races. Re-run existing
+static LCD tests. Measure firmware size and bounded RAM use against the
+existing build; preserve the working bootloader, clock, and USART1 setup.
+
+Live tests, flashing, service restarts, and production configuration edits
+remain separate authorized maintenance steps. First validate knob and
+drawing with actions mocked, then test each physical action while idle.
+Rollback disables the optional menu module and, if necessary, restores
+the saved matching host/firmware pair. No production or hardware changes
+have been made as part of this proposal.
 
 ## Reported MCU firmware on idle (2026-10-29)
 
@@ -922,6 +1413,7 @@ Dependency update behavior: [Moonraker application deployment](https://github.co
 - Tests and a rollback procedure precede any live deployment.
 
 ## Out of scope for now
-- Touch/UI interaction, changing temperatures, manual movement, LCD menus.
+- Touch interaction and additional printing/paused controls beyond the
+  implemented debounced `PAUSE` press. Idle knob menus are implemented.
 - Live current layer, elapsed/remaining time, Z, progress, and periodic LCD refresh.
 - HX711 auto Z-offset and power-loss recovery (separate planned projects).

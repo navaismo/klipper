@@ -50,6 +50,34 @@ physical load-cell accuracy or a safe printing offset.
    the previous revision for rollback. Host reloads, firmware flashing and
    physical qualification remain explicit deployment steps.
 
+## Combining LCD menus with Auto Z-offset
+
+`feature/Auto_Z_offset` is the combined development branch. Keep the
+host-designed menu/card modules alongside `lcd_canvas.py` and the existing
+calibration interfaces. Generic drawing, legacy coordinate canvas and v5
+jobs use their own registered commands and matching abort command; do not
+resolve a merge by replacing one backend wholesale with the other.
+
+Calibration invalidates and reserves the knob menu, suppresses queued idle
+drawing and rejects print preflight until its session ends. A drawing-only
+MCU can render the existing calibration operations through `TJC_DRAW_VERSION=1`
+without reflashing; `TJC_CANVAS_VERSION=1` remains supported. Generic firmware
+uses the host-owned small idle footer even if the legacy footer capability
+is also present. Preserve the static print card and printing-time PAUSE.
+
+The integration retains the November 2 Auto Z-offset runtime and diagnostic
+work, including previously untracked helper modules and fixtures. Older
+workflow test mocks must provide current bounded tap parameters and acquired
+contact reports. Manual qualification is optional in the native workflow;
+tests must retain fresh-measurement, contact, spatial and acceptance checks.
+Do not reinstate retired runtime prerequisites to satisfy old tests.
+
+The combined offline suite passes 465 Python/native-C tests. The combined
+STM32F103 firmware linked in an isolated validation build with both drawing
+backends (53876-byte binary, within the configured 65536-byte flash region).
+This validates integration, not flashing, physical offset accuracy or panel
+timing. Keep owner stashes/backups until the owner commits the reviewed merge.
+
 ## Homing and probe event contract
 
 Upstream `homing:home_axes` reports completed homing for both conventional

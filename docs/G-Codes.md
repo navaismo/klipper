@@ -342,11 +342,14 @@ Also provided is the following extended G-Code command:
 
 ### [lcd_status]
 
-The following fork-specific command is available when an
+The following fork-specific commands are available when an
 [lcd_status config section](Config_Reference.md#lcd_status) is enabled.
 By default it also prepares fresh data automatically before
 `SDCARD_PRINT_FILE` or the first `M24` after selecting a file, without
 repeating on pause/resume. Set `auto_prepare: False` for manual use only.
+See the [complete setup guide](TJC_LCD_Setup.md) for firmware capabilities,
+configuration, dependencies and idle testing. Quote filenames containing
+spaces, for example `LCD_RENDER FILENAME="parts/example part.gcode"`.
 
 #### LCD_PREPARE
 
@@ -376,17 +379,31 @@ static card without starting a print. Requires both `[lcd_status]` and
 `[tjc_lcd]`, matching job-render MCU firmware, and an idle printer.
 The command waits for acknowledged transfer, CRC validation and the MCU's
 final protocol checkpoint. Missing thumbnails retain the text-only
-fallback. Output explicitly reports whether a 96x96 thumbnail was included
+fallback. Output explicitly reports whether a prepared thumbnail was included
 and displays preparation warnings; automatic preparation logs warnings
 in `klippy.log`. When automatic preparation is enabled, the same render path
 runs before the first file G-code; no `START_PRINT` macro change is needed.
+With `TJC_DRAW_VERSION=1`, the host composes the new static print card
+and enlarges the prepared 96x96 thumbnail to 120x120 on the panel. The
+header reads `PRINTING` in orange, and the footer reads `Press Knob to Pause`.
+All generic drawing batches finish before the command returns or printing
+can start. The completed card is static during printing and pause/resume.
+This manual command remains usable after an LCD error: while idle it
+requests bounded handshake/clear recovery, then retries the card. It
+does not start a print or restart Klipper/firmware. Failure to recover
+remains an error; automatic print preparation retains its error gate.
+Manual errors are prefixed `LCD_RENDER failed`; acknowledgement timeouts
+include the token and expected offset/state, with the last received reply
+in `klippy.log`.
 
 ### [tjc_lcd]
 
 The following fork-specific commands require the
 [tjc_lcd config section](Config_Reference.md#tjc_lcd) and matching MCU
-firmware. They require an idle printer and reject printing/paused jobs.
-INIT/CLEAR return when sent; IDLE/RECT wait for the final render checkpoint.
+firmware. All require an idle printer and reject printing/paused jobs.
+Initialization and clear return when the request is sent; inspect
+`tjc_lcd.state` for completion and wait for `ready` before another operation.
+`TJC_LCD_IDLE` and `TJC_LCD_RECT` wait for the completed render checkpoint.
 
 #### TJC_LCD_INIT
 
@@ -401,7 +418,8 @@ a handshake failure while idle.
 `TJC_LCD_CLEAR [COLOR=<integer>]`: Request a clear after initialization
 has succeeded. COLOR is an RGB565 integer from 0 to 65535; it defaults
 to the configured `clear_color`. This only clears the screen; it does
-not send job text or thumbnails. Do not put these commands inside the
+not send job text, thumbnails or an idle screen. Once the clear finishes,
+use `TJC_LCD_IDLE` to restore Idle. Do not put these commands inside the
 printing file or its start/end macros.
 
 #### TJC_LCD_RECT
@@ -411,31 +429,44 @@ Fill an inclusive rectangle without clearing the screen, using logical
 240x320 coordinates (X 0..239, Y 0..319, X0<=X1, Y0<=Y1). COLOR is a decimal
 RGB565 integer 0..65535. Filling with the region's background color erases
 only that region. For example, `TJC_LCD_RECT X0=20 Y0=100 X1=90 Y1=120 COLOR=34`
-uses the calibration background. Requires TJC_CANVAS_VERSION=1 mainboard
-firmware and an idle/unpaused printer with no calibration in progress.
+uses the calibration background. Requires `TJC_CANVAS_VERSION=1` or
+`TJC_DRAW_VERSION=1` mainboard firmware and an idle/unpaused printer with
+no calibration in progress. It closes any knob menu before drawing.
 Wait for queued motion and the final handshake/settling checkpoint before
 returning; `tjc_lcd.screen` becomes `custom`. Do not use during printing.
 
 #### TJC_LCD_IDLE
 
-`TJC_LCD_IDLE`: Render the static idle logo, printer name, reported MCU firmware
-and Idle indicator without starting a print. Requires ready Klipper,
+`TJC_LCD_IDLE`: Render the static idle logo, printer name, repository URL
+and Idle indicator with the connected LCD MCU's firmware revision without
+starting a print. With generic drawing firmware, a small host-rendered
+footer below Idle includes the MCU compilation date as `YYYY-MM-DD`.
+Requires ready Klipper,
 matching v5 MCU firmware, and an idle/unpaused printer. It waits for queued
 movements and the final render checkpoint. This screen also appears once
 after startup initialization and after completion/cancellation once motion
-has finished. Pauses and errors preserve the job card. Labels on the job
-card are yellow; values remain white, and layer height uses `Height:`.
-The idle firmware line uses the connected display MCU's identification
-version rather than local build files. With TJC_IDLE_VERSION=1 firmware,
-normal builds show `FW <revision> <YYYYMMDD_HHMMSS>` centered at y304 in the
-panel-verified 8x16 font and keep the full repository URL at its original
-x12/y207 in the same font. Branding/model remain unchanged; Idle moves to y276
-to leave space above the footer. With older v5 firmware, the URL stays in place
-and the model line shows `<revision> <MMDD_HHMMSS>` to fit its 20 cells.
-This compatibility mode still identifies the loaded build without flashing.
-No canvas/coordinate diagnostics are displayed; missing identity shows
-`FW: unknown`. The new footer placement requires a mainboard firmware update;
-the panel firmware is unchanged.
+has finished. Pauses and errors preserve the job card.
+With the optional [tjc_menu](Config_Reference.md#tjc_menu), this command
+also closes the knob menu. Initialization and clear invalidate pending
+menu input as well.
+
+### [tjc_menu]
+
+The optional [tjc_menu config section](Config_Reference.md#tjc_menu)
+registers no additional G-code commands. Rotate from visible Idle to open
+Menu, click to enter/execute, or hold for 0.8 seconds to return to Idle.
+Navigation redraws have a fixed 200 ms cooldown, with one pending latest
+selection. Menu Home uses the existing `G28` command; other idle actions
+use normal host heater/motion interfaces. Load/Unload heat to 240 C and
+accept a cancel press; both turn the nozzle off after cleanup. See the
+[action table](TJC_LCD_Setup.md#knob-controls-and-actions) for distances,
+speeds, homing and travel checks.
+
+During an active print, a new debounced knob press executes the existing
+`PAUSE` command once, including configured macro overrides. No screen
+update or automatic `RESUME` is issued; paused clicks and printing-time
+rotation are ignored. The print-pause and filament-cancel presses do not
+use the navigation cooldown.
 
 ### [dual_carriage]
 
@@ -1049,6 +1080,51 @@ and heat the bed/nozzle; perform the staged qualification in
 
 #### AUTO_Z_OFFSET
 
+The normal workflow and AUTO_Z_OFFSET_CALIBRATE are available. The optional
+observational mode never creates an applicable candidate:
+
+`AUTO_Z_OFFSET DIAGNOSTIC=1 [POINT=1] [COLD=1]
+[BED_TEMP=<degrees>] [NOZZLE_TEMP=<degrees>]`
+
+Run exactly one paired measurement at configured P1 through the existing
+CR Touch, HX711 tap and LCBestFit. Keep the original ascent-based calculation
+for comparison and also compute a diagnostic descent-onset estimate.
+CR Touch retains its configured sample count; there is only one nozzle tap,
+no second point, no contact retry and no subsequent calibration series.
+Require homed XYZ and an already inactive mesh; this bounded diagnostic does
+not run G28 or clear the mesh automatically. It uses the same integrated
+CR Touch-relative nozzle limit as the normal workflow, without `test_*`
+configuration or command-level force/travel overrides.
+
+`COLD=1` requires both heaters off and valid readings within the existing
+cold-test range; omit temperature parameters in this mode. Without COLD,
+use the existing configured bed/nozzle targets and thermal checks, restoring
+previous targets afterward. For an already prepared cold DEV printer:
+
+```text
+AUTO_Z_OFFSET DIAGNOSTIC=1 COLD=1
+```
+
+Report the MCU trigger, existing branch estimates, original primary fit and
+observational offset, plus `contact_onset`: the descent-only estimate and its
+own observational offset if supported. A drifting baseline is fitted in real
+time, with a positive compression hinge in Z. Existing descending analysis
+windows test sensitivity without a printer-specific correction or new setting.
+The onset verdict uses evidence against drift alone, residual autocorrelation,
+profile/sampling intervals and agreement between supported windows. When
+windows disagree, report unresolved rather than selecting a convenient Z.
+The original withdrawal/branch verdict remains a diagnostic comparison and
+does not require identical contact coordinates in this mode. It does not
+select, average with or veto a supported descent onset. Diagnostic completion
+now follows the descent-onset verdict; it never authorizes application.
+The normal workflow retains its existing estimator and qualification policy.
+A completed unresolved onset finishes as `diagnostic_rejected` after cleanup,
+retaining the original model results and new window evidence. Sensor, MCU, motion, thermal,
+invalid-result and cleanup errors still stop execution and propagate.
+Even an internally consistent diagnostic creates no candidate, result or
+point qualification. AUTO_Z_OFFSET_ACCEPT refuses it; nothing is staged,
+applied or saved. Observational repeatability is not physical validation.
+
 `AUTO_Z_OFFSET [BED_TEMP=<degrees>] [NOZZLE_TEMP=<degrees>]`:
 Run the two-point workflow with one command. Require exactly two configured
 `probe_points`, an idle printer and a calibrated sensor. Warm up once, clear
@@ -1074,7 +1150,8 @@ BED_TEMP/NOZZLE_TEMP explicitly override them. The cleared mesh stays cleared.
 This command does not alter print-start or KAMP macros. Acceptance and
 SAVE_CONFIG remain separate user actions.
 
-With `[tjc_lcd]` and firmware advertising TJC_CANVAS_VERSION=1, all three
+With `[tjc_lcd]` and firmware advertising `TJC_CANVAS_VERSION=1` or
+`TJC_DRAW_VERSION=1`, all three
 measurement commands show the calibration layout. Highlight CR Touch Reference
 before the CR Touch reading, Nozzle Contact before baseline/tare/contact,
 and Computing Offset for final candidate validation. The host supplies bounded
@@ -1082,9 +1159,24 @@ drawing coordinates and text; the MCU owns framing and USART2. Draw the screen
 once, then repaint only changed rows and the small status strip. Each partial
 update and final fence finish before measurements. No periodic animation or
 LCD traffic runs during acquisition/fit. The panel firmware is unchanged;
-the mainboard firmware must be rebuilt/flashed once for the coordinate API.
-Without that capability, calibration can run with a console warning and no
+the existing generic drawing executor is reused without reflashing when
+the coordinate backend is absent. Without either capability, calibration
+can run with a console warning and no
 LCD changes; there is no fallback to blinking full-card redraws.
+
+All Auto Z-offset nozzle approaches have a finite endpoint derived from
+that pair's fresh CR Touch surface reference: `minimum_z = cr.bed_z -
+load_cell_retract_dist`, where `load_cell_retract_dist` is the existing tap's
+`sample_retract_dist`. Maximum descent is the starting travel clearance minus
+that endpoint. The endpoint must be finite, below clearance and strictly
+above the native Z minimum; otherwise refuse the nozzle approach. Never clip
+an invalid endpoint to the global minimum. This uses the saved CR Touch
+geometry as native probing does; it does not change the offset formula or
+certify a physical force limit. MCU raw-force/error protection stays active.
+A missing trigger reaches only this endpoint, raises the native no-trigger
+error, and performs the existing upward cleanup when Z remains homed and
+Klipper is operational. No deeper retry or automatic offset save occurs.
+The local C0 `test_*` options are retired and ignored if still present.
 
 #### AUTO_Z_OFFSET_TEST_CONTACT
 
@@ -1092,9 +1184,9 @@ LCD changes; there is no fallback to blinking full-card redraws.
 [NOZZLE_TEMP=<degrees>]`:
 Perform one supervised CR Touch/nozzle pair using the MCU analog trigger and
 existing contact estimator. POINT is the one-based configured point index
-(default 1). Every configured location requires a successful supervised test
-before calibration. Qualification is invalidated by homing, changed probe or
-sensor calibration references, disconnect or a failed contact run.
+(default 1). This optional single-pair command is not a prerequisite for
+CALIBRATE. Previous point reports are invalidated by changed references,
+homing, disconnect or failed measurements.
 No offset is staged or saved. Require homed XYZ, a clean nozzle, a clear
 contact area, a calibrated sensor and an inactive bed mesh.
 After CR Touch measurement, warm-up and a drained move to nozzle clearance,
@@ -1134,11 +1226,38 @@ the existing probing result or safety errors. Read the
 [systematic error investigation](AUTO_Z_OFFSET_PLAN.md#systematic-offset-investigation-2026-10-30)
 before collecting new contacts. No automatic acceptance or save is performed.
 
+Auto Z-offset now qualifies each completed tap using the existing diagnostic
+report. Both branches must be identified in a consistent coordinate frame,
+with valid acquisition timing and a sustained descending force rise. The
+span of the descending fit, ascending fit and primary result must not exceed
+`offset_tolerance`. Failure rejects the pair without a candidate or retry.
+This check runs after the existing retract/fit; it does not change motion,
+MCU protection, LCBestFit or the offset formula. The ordinary load-cell probe
+retains its existing behavior even when passive diagnostics fail.
+Agreement is internal model consistency, not physical validation: a shared
+force-transfer or coordinate bias can pass. No midpoint correction is applied.
+`last_contact.contact_qualification` explains the decision; a rejected model
+has null `offset` and retains the numerical `model_offset` for investigation.
+
+The existing report also includes diagnostic-only fitting-window sensitivity.
+Descending windows end at the MCU trigger and cover 0.25, 0.5, 1 and 2 seconds,
+plus the full recorded descent. Retraction windows start at the existing
+ascent start and cover 1.5, 2, 3 and 5 seconds when acquisition coverage allows.
+Each supported window reports its contact-model Z, slope and residual RMS;
+the maximum Z variation is reported separately for each branch. The console
+summarizes both variations alongside the unchanged branch-consistency verdict.
+Full-branch fits are reused when possible; there is no new acquisition,
+step-history query or movement. Window failures are isolated and cannot change
+the primary fit or the existing branch verdict. No new rejection threshold
+is applied, and low window sensitivity does not establish absolute accuracy
+or remove an unknown shared physical-contact bias.
+
 #### AUTO_Z_OFFSET_CALIBRATE
 
 `AUTO_Z_OFFSET_CALIBRATE [BED_TEMP=<degrees>] [NOZZLE_TEMP=<degrees>]`:
-Require successful supervised contact at every configured point. With
-`probe_points`, measure three fresh CR Touch/nozzle pairs at each configured
+Require homed XYZ, an idle printer, an inactive mesh and a calibrated sensor;
+no previous manual contact qualification is required. With `probe_points`,
+measure three fresh CR Touch/nozzle pairs at each configured
 physical points and report each local median/minimum/maximum/range. Reject
 invalid contacts, non-finite/out-of-range offsets and excessive within-point
 spread immediately, without discarding samples or retrying. Each CR Touch

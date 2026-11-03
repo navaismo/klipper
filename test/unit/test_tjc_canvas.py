@@ -61,11 +61,14 @@ class HostTests(unittest.TestCase):
         self.assertEqual(self.sent, [])
 
     def test_missing_or_wrong_ack_aborts_without_claiming_success(self):
+        self.module.draw_commands = tuple(mock.Mock() for i in range(4))
         self.commands['rect'].send.side_effect = lambda args: self.ack(999, 1)
         with self.assertLogs(level='WARNING'):
             with self.assertRaisesRegex(RuntimeError, 'acknowledgement'):
                 self.module.render_canvas([lcd_canvas.rect(8, 9, 10, 11, 0)])
         self.commands['abort'].send.assert_called_once()
+        self.module.draw_commands[3].send.assert_not_called()
+        self.assertIsNone(self.module.render_abort_cmd)
         self.assertEqual(self.module.state, 'error')
         self.assertIsNone(self.module.screen)
 
@@ -131,6 +134,24 @@ class HostTests(unittest.TestCase):
         self.assertEqual(rectangle[0][3:], [20, 100, 90, 120, 34])
         self.assertEqual(self.module.screen, 'custom')
         self.objects['toolhead'].wait_moves.assert_called_once()
+
+    def test_all_capabilities_register_without_replacing_either_backend(self):
+        self.mcu.get_constants.return_value = {
+            'TJC_LCD_VERSION': 1, 'TJC_JOB_VERSION': 5,
+            'TJC_DRAW_VERSION': 1, 'TJC_CANVAS_VERSION': 1}
+        registered = {}
+        def lookup(name, **kwargs):
+            command = registered[name] = mock.Mock()
+            return command
+        self.mcu.lookup_command.side_effect = lookup
+        self.module._build_config()
+        self.assertIs(self.module.canvas_abort_cmd,
+                      registered['tjc_lcd_canvas_abort oid=%c token=%u'])
+        self.assertIs(self.module.draw_commands[3],
+                      registered['tjc_lcd_draw_abort oid=%c token=%u'])
+        self.assertIs(self.module.job_abort_cmd,
+                      registered['tjc_lcd_job_abort oid=%c token=%u'])
+        self.assertEqual(self.mcu.register_serial_response.call_count, 4)
 
     def test_manual_rectangle_cannot_interrupt_calibration(self):
         self.module.begin_calibration('Warming up')

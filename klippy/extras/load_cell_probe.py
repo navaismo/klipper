@@ -454,16 +454,27 @@ class LoadCellProbingMove:
         self._mcu_trigger_analog.set_trigger("abs_ge", trigger_frac_grams)
 
     # Probe towards z_min until the trigger_analog on the MCU triggers
-    def probing_move(self, gcmd):
+    def probing_move(self, gcmd, minimum_z=None, maximum_descent=None):
         # do not permit probing if the load cell is not calibrated
         if not self._load_cell.is_calibrated():
             raise self._printer.command_error("Load Cell not calibrated")
-        # tare the sensor just before probing
-        self._pause_and_tare(gcmd)
-        # get params for the homing move
         toolhead = self._printer.lookup_object('toolhead')
         pos = toolhead.get_position()
-        pos[2] = self._z_min_position
+        target_z = self._z_min_position
+        if minimum_z is not None or maximum_descent is not None:
+            if (minimum_z is None or maximum_descent is None
+                    or any(math.isnan(v) or math.isinf(v) for v in
+                           (pos[2], minimum_z, maximum_descent))
+                    or maximum_descent <= 0.):
+                raise self._printer.command_error("Invalid contact bounds")
+            target_z = max(target_z, minimum_z, pos[2] - maximum_descent)
+            if target_z >= pos[2]:
+                raise self._printer.command_error(
+                    "Contact bound prevents descent")
+        pos[2] = target_z
+        # Validate the endpoint before tare or MCU arming.
+        self._pause_and_tare(gcmd)
+        # get params for the homing move
         speed = self._param_helper.get_probe_params(gcmd)['probe_speed']
         phoming = self._printer.lookup_object('homing')
         # start collector after tare samples are consumed
@@ -540,6 +551,7 @@ class TappingMove:
         self._last_result = None
         self._last_trigger_z = None
         self._is_last_result_valid = False
+        self._last_diagnostic_report = None
         self._collector = None
         # webhooks support
         self._clients = load_cell.ApiClientHelper(config.get_printer())
@@ -549,20 +561,27 @@ class TappingMove:
             "load_cell_probe", name, header)
         self._best_fit = LCBestFit(self._printer)
 
-    def run_tap(self, gcmd):
+    def run_tap(self, gcmd, minimum_z=None, maximum_descent=None):
         self._is_last_result_valid = False
         self._last_result = None
         self._last_trigger_z = None
+        self._last_diagnostic_report = None
         try:
-            return self._run_tap(gcmd)
+            if minimum_z is None and maximum_descent is None:
+                return self._run_tap(gcmd)
+            return self._run_tap(gcmd, minimum_z, maximum_descent)
         finally:
             if self._collector is not None:
                 self._collector.stop_collecting()
                 self._collector = None
 
-    def _run_tap(self, gcmd):
+    def _run_tap(self, gcmd, minimum_z=None, maximum_descent=None):
         # do the descending move
-        epos, collector = self._load_cell_probing_move.probing_move(gcmd)
+        if minimum_z is None and maximum_descent is None:
+            epos, collector = self._load_cell_probing_move.probing_move(gcmd)
+        else:
+            epos, collector = self._load_cell_probing_move.probing_move(
+                gcmd, minimum_z=minimum_z, maximum_descent=maximum_descent)
         self._collector = collector
         self._last_trigger_z = epos[2]
         # collect samples from the tap
@@ -626,10 +645,11 @@ class TappingMove:
                         motion['frames']['after_ascent'] = (
                             load_cell_diagnostics.snapshot(
                                 self._printer, toolhead))
-                        load_cell_diagnostics.log_report(results[0], motion,
-                            toolhead, _lookup_z_pos,
-                            self._best_fit.find_best_fit,
-                            corrected_z, fit_error)
+                        self._last_diagnostic_report = (
+                            load_cell_diagnostics.log_report(results[0], motion,
+                                toolhead, _lookup_z_pos,
+                                self._best_fit.find_best_fit,
+                                corrected_z, fit_error))
                 except Exception:
                     load_cell_diagnostics.warn('ascent report')
         # Replace the probe result with the fitted Z position
@@ -643,6 +663,10 @@ class TappingMove:
         self._is_last_result_valid = True
         self._last_result = epos[2]
         return epos, self._is_last_result_valid
+
+    def get_contact_diagnostics(self):
+        # Reuse the existing report; no extra acquisition or fitting pass.
+        return self._last_diagnostic_report
 
     def get_status(self, eventtime):
         return {
