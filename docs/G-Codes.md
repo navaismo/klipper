@@ -1083,6 +1083,54 @@ and heat the bed/nozzle; perform the staged qualification in
 The normal workflow and AUTO_Z_OFFSET_CALIBRATE are available. The optional
 observational mode never creates an applicable candidate:
 
+Nozzle acquisition uses finite MCU-scheduled moves, with the native analog
+endstop armed continuously throughout the search and host analysis. The free
+approach ends at `cr.test_z - minimum_offset`, using the existing allowed
+probe separation as a search reference, not a measured offset. Further
+advances are at most `probe_speed * MONITOR_MAX / sensor_sample_rate`:
+0.01875 mm at 0.5 mm/s, 80 SPS and the existing three-sample MCU monitor
+budget, subject to native step quantization. Each finite advance finishes
+before fresh timestamped samples are evaluated with the existing onset
+confidence checks. No next descent is queued while the host waits or fits.
+This bounds queued travel independently of host detection latency; it does
+not assert a physical force limit from a distance alone. Acquisition may
+take longer than a continuous force-triggered move.
+Live onset windows cover the existing nominal durations times probe speed
+in Z travel, so stationary waits cannot shrink their spatial coverage.
+All fits retain real timestamps; baseline drift and confidence criteria
+are unchanged. Inadequate recorded coverage still rejects a window.
+Mathematical window agreement alone cannot stop acquisition: the selected
+fit's existing profile/sampling interval must also fit within one bounded
+search advance. This conservative precision policy has no new setting and
+does not prove physical accuracy. An identified but insufficiently localized
+model keeps searching inside the original floor, or fails there; it cannot
+become a provisional candidate.
+It must also observe three fresh consecutive compression samples beyond
+the selected profile interval. Each must exceed the existing diagnostic
+noise-rise criterion, max(5 times observed free residual RMS, 1 g), both
+relative to the operational tare and above the drifting free baseline.
+Mathematical stability, an old spike or extrapolation alone cannot stop the
+nozzle. Missing load evidence continues only within the existing bound or
+rejects there. Tare/epoch changes and stale samples reject; no deeper retry
+or hardware force-threshold change is involved. Rejected/incomplete
+acquisition cannot produce an applicable candidate.
+
+A supported onset ends normal acquisition without requiring the configured
+hard-force trigger. The MCU force trigger, raw safety limits and sensor/
+communication monitoring remain independent protections; a hard-force stop
+before a supported onset is an error, not a substitute contact candidate.
+Missing/stale data, invalid references or reaching the unchanged travel floor
+without reliable onset reject the acquisition. There is no deeper retry or
+global-minimum fallback. The initial P1 search still depends on the native
+homing coordinate seed; arbitrary fresh-install offsets may place contact
+outside its existing envelope. In that case the command must fail.
+
+Withdrawal remains diagnostic: its fit may be unavailable without vetoing
+a supported onset. Sensor errors and incomplete/changed coordinate
+references remain fatal. No new setting or MCU firmware update is required.
+The paired result remains `cr.test_z - descent_contact_onset_z`; APPLY,
+ROLLBACK, local/spatial validation and explicit saving are unchanged.
+
 `AUTO_Z_OFFSET DIAGNOSTIC=1 [POINT=1] [COLD=1]
 [BED_TEMP=<degrees>] [NOZZLE_TEMP=<degrees>]`
 
@@ -1105,7 +1153,8 @@ previous targets afterward. For an already prepared cold DEV printer:
 AUTO_Z_OFFSET DIAGNOSTIC=1 COLD=1
 ```
 
-Report the MCU trigger, existing branch estimates, original primary fit and
+Report the MCU trigger when one occurred, existing branch estimates,
+original primary fit when available and
 observational offset, plus `contact_onset`: the descent-only estimate and its
 own observational offset if supported. A drifting baseline is fitted in real
 time, with a positive compression hinge in Z. Existing descending analysis
@@ -1117,7 +1166,8 @@ The original withdrawal/branch verdict remains a diagnostic comparison and
 does not require identical contact coordinates in this mode. It does not
 select, average with or veto a supported descent onset. Diagnostic completion
 now follows the descent-onset verdict; it never authorizes application.
-The normal workflow retains its existing estimator and qualification policy.
+The normal workflow now uses the same onset-confidence criteria for each
+pair; withdrawal agreement is diagnostic only.
 A completed unresolved onset finishes as `diagnostic_rejected` after cleanup,
 retaining the original model results and new window evidence. Sensor, MCU, motion, thermal,
 invalid-result and cleanup errors still stop execution and propagate.
@@ -1139,7 +1189,13 @@ within each pair follow the probe's configured sample count and are not
 additional contact tests. A failed test prevents entry into calibration;
 a failed calibration pair stops the remaining sequence.
 Apply the same local/spatial checks as AUTO_Z_OFFSET_CALIBRATE. The candidate
-is P1's median; P2 only validates agreement. No offset is applied or saved.
+is P1's median; P2 only validates agreement. Each paired offset is
+`cr.test_z - descent_contact_onset_z`. The existing onset estimator must
+identify supported compression against a drifting free-motion baseline,
+with valid coordinates/timing, sufficient correlation-adjusted signal
+support and compatible supported-window intervals. An unresolved onset
+rejects the pair; neither the old descending hinge nor withdrawal fit can
+substitute for it. No offset is applied or saved.
 
 On failure, stop the sequence and report the stage, point/pair and original
 error. Spatial rejection retains both point reports without a candidate.
@@ -1149,6 +1205,26 @@ to 50 C bed and 170 C nozzle unless configured otherwise in `[auto_z_offset]`;
 BED_TEMP/NOZZLE_TEMP explicitly override them. The cleared mesh stays cleared.
 This command does not alter print-start or KAMP macros. Acceptance and
 SAVE_CONFIG remain separate user actions.
+
+The measured separation is `cr.test_z - nozzle_contact_z` in one kinematic
+frame. A common change in homing origin cancels; the configured probe offset
+is not a calibration target. Klipper still requires a numerical probe offset
+for native homing. The first P1 keeps its existing bounded approach from
+fresh CR Touch `bed_z`. After its first supported onset, every subsequent
+pair, including further P1 pairs, uses
+`surface = p1_nozzle_contact_z + current_cr_test_z - p1_cr_test_z`, with the
+same existing retraction distance below that estimated surface. This avoids
+consuming that allowance on the difference from the old configured offset.
+The reference is limited to the current run and does not apply an offset.
+Every endpoint must remain finite, above the native minimum and below
+clearance. Without a same-run P1 reference, the original bound remains.
+No failed descent is retried or progressively deepened. The first P1 envelope
+still depends on the configured offset: its effective reach below the
+CR Touch trigger is configured offset plus retraction distance. This is not
+a qualified bootstrap for an arbitrary fresh-install offset. Without an
+independent surface reference, do not invent a deeper initial endpoint or
+manufacture a candidate. A successful fit does not prove absolute physical
+accuracy.
 
 With `[tjc_lcd]` and firmware advertising `TJC_CANVAS_VERSION=1` or
 `TJC_DRAW_VERSION=1`, all three
@@ -1226,18 +1302,17 @@ the existing probing result or safety errors. Read the
 [systematic error investigation](AUTO_Z_OFFSET_PLAN.md#systematic-offset-investigation-2026-10-30)
 before collecting new contacts. No automatic acceptance or save is performed.
 
-Auto Z-offset now qualifies each completed tap using the existing diagnostic
-report. Both branches must be identified in a consistent coordinate frame,
-with valid acquisition timing and a sustained descending force rise. The
-span of the descending fit, ascending fit and primary result must not exceed
-`offset_tolerance`. Failure rejects the pair without a candidate or retry.
-This check runs after the existing retract/fit; it does not change motion,
-MCU protection, LCBestFit or the offset formula. The ordinary load-cell probe
-retains its existing behavior even when passive diagnostics fail.
-Agreement is internal model consistency, not physical validation: a shared
-force-transfer or coordinate bias can pass. No midpoint correction is applied.
-`last_contact.contact_qualification` explains the decision; a rejected model
-has null `offset` and retains the numerical `model_offset` for investigation.
+Auto Z-offset qualifies each completed tap with the existing descent-onset
+estimator and its confidence checks. `last_contact.onset_qualification`
+explains the paired decision. An unresolved onset has null `offset` and
+cannot create a candidate; the legacy `model_offset` remains available.
+`contact_qualification` preserves the old branch-agreement comparison solely
+as a hysteresis diagnostic. Neither a branch disagreement above 0.025 mm
+nor an unsupported diagnostic withdrawal branch vetoes a supported onset.
+The existing acquisition/retraction engine and its fatal errors are retained.
+MCU protection, force/travel/thermal limits and LCBestFit are unchanged.
+No midpoint, legacy-fit fallback or prior-offset target is used. Signal-model
+support is not absolute physical validation; shared biases remain possible.
 
 The existing report also includes diagnostic-only fitting-window sensitivity.
 Descending windows end at the MCU trigger and cover 0.25, 0.5, 1 and 2 seconds,
@@ -1245,7 +1320,7 @@ plus the full recorded descent. Retraction windows start at the existing
 ascent start and cover 1.5, 2, 3 and 5 seconds when acquisition coverage allows.
 Each supported window reports its contact-model Z, slope and residual RMS;
 the maximum Z variation is reported separately for each branch. The console
-summarizes both variations alongside the unchanged branch-consistency verdict.
+summarizes both variations alongside the legacy branch-consistency verdict.
 Full-branch fits are reused when possible; there is no new acquisition,
 step-history query or movement. Window failures are isolated and cannot change
 the primary fit or the existing branch verdict. No new rejection threshold
@@ -1295,6 +1370,46 @@ Thermal failures report the heater, measured/current-target/expected-target
 values and allowed band. On failure, a separate message identifies the
 previous targets restored during cleanup. Do not bypass a thermal failure
 by increasing tolerance to hide erratic sensor readings.
+
+#### AUTO_Z_OFFSET_APPLY
+
+`AUTO_Z_OFFSET_APPLY`: Explicitly apply a validated normal calibration
+candidate for an unsaved first-layer trial. Takes no parameters. Require idle,
+unchanged references, a finite in-range valid result and no pending probe
+offset edit. Diagnostic, rejected, missing or stale results cannot be applied.
+
+Drain queued moves, then invoke native `SET_GCODE_OFFSET` with `MOVE=0` and
+`Z = configured_probe_z_offset - measured_probe_z_offset`. This replaces any
+existing G-code Z correction and records it for rollback. It does not move
+the nozzle, modify the probe/endstop, write configuration or call ACCEPT or
+SAVE_CONFIG. The configured value is only the homing coordinate seed; it is
+not the target of the measurement. Consume the candidate to prevent double
+application. Restore the trial before another measurement or calibration.
+
+The correction persists through native G28, including the inspected
+PRINT_START workflow and its fresh mesh. A macro, slicer command or restored
+G-code state that resets the Z correction can cancel it. A Klipper restart
+also discards the unsaved correction and reloads configuration. Supervise the
+first layer; internally consistent measurements can retain physical bias.
+
+```text
+AUTO_Z_OFFSET BED_TEMP=60 NOZZLE_TEMP=170
+# Only after successful completion and review:
+AUTO_Z_OFFSET_APPLY
+# Start the supervised first-layer print separately.
+# After the print has ended or been cancelled and motion has stopped:
+AUTO_Z_OFFSET_ROLLBACK
+```
+
+#### AUTO_Z_OFFSET_ROLLBACK
+
+`AUTO_Z_OFFSET_ROLLBACK`: While idle, drain queued moves and restore the
+G-code Z correction recorded before APPLY, using native SET_GCODE_OFFSET with
+MOVE=0. Takes no parameters. Do not issue it during a print or paused job;
+end/cancel the job and drain motion first. No movement, saving, homing or
+configuration change is performed. Rollback remains available after a G28
+invalidates the measurement report. It also discards any subsequent trial
+babystepping. Without an applied trial, the command refuses to run.
 
 #### AUTO_Z_OFFSET_ACCEPT
 

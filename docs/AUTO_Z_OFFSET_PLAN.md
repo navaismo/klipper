@@ -34,6 +34,286 @@ four-point qualification below explains the move to reference/validation.
 
 ## Systematic offset investigation (2026-10-30)
 
+### Independent PRTouch comparison (2026-11-03)
+
+`contact_estimator: current` preserves the existing descent-onset selection.
+`contact_estimator: prtouch` selects the independent PRTouch numerical result
+from giorgiomaccari's `e3v3se_klipper_display_customCal` (`master`,
+`klippy/extras/prtouch.py` and `filter.py`). It does not select another
+acquisition or movement controller. LCBestFit remains unchanged as the
+legacy withdrawal diagnostic; all three methods observe one acquisition.
+No active configuration is changed by adding the option.
+
+PRTouch preserves the original minimum-magnitude three-sample filter,
+80-Hz/5-Hz high-pass filter, 0.8 low-pass coefficients, 64-sample input
+buffer, 32-sample analysis, 3000/50000 filtered-count rules, normalization,
+rotation and first-minimum contact index. These are original algorithm
+defaults, not force recommendations or values fitted to this printer.
+The original `_check_trigger` update repeatedly smoothing a single index is
+preserved. Exhausted motion and protective max_hold cannot establish contact.
+Constant signals and invalid/incomplete acquisitions return `not_evaluable`.
+
+The data adapter uses recorded raw ADC counts minus the recorded operational
+tare; it does not repeat the original driver's trimmed `read_base` procedure.
+It also does not reproduce the original post-stop transport buffer. The
+original filter's sample-index conventions are preserved, without inventing
+a filter-delay correction. The contact index maps directly to that sample's
+original MCU-derived timestamp and reconstructed Klipper-history Z. It never
+interpolates between movement endpoints or compresses stationary time into
+continuous descent. An 80-SPS configured rate and intact samples with no gaps
+above the original 20-ms dirty-reading criterion are required; no resampling
+or conversion of filtered-count thresholds to grams is performed. Segmented
+recordings retain their stationary samples and their real staircase Z.
+Rolling recordings whose left edge is not the recorded acquisition start
+require a complete original 64-sample buffer before evaluating a prefix;
+an artificial filter reset at a truncated left edge cannot become contact.
+
+PRTouch runs alongside the current estimator even with the default selection.
+If selected but unsupported, it rejects without falling back to the current
+result. A supported PRTouch result remains observational: complete numerical
+agreement does not enable APPLY or ACCEPT. There is no configuration switch
+to bypass physical-validation requirements. The current estimator retains
+its existing explicit APPLY/ROLLBACK and confirmation behavior.
+
+`scripts/replay_prtouch_estimators.py` replays recorded JSON acquisitions
+without printer access. The source excerpts and SHA256 fingerprints used by
+the algorithm-fidelity tests live in
+`test/fixtures/prtouch_giorgiomaccari_reference.json`. No original PRTouch
+motor driver, firmware, offset application or configuration writer is ported.
+
+### Onset-controlled acquisition (2026-11-03)
+
+The 75 g MCU trigger previously served both normal completion and protection.
+The four November 3 endpoint records show why that fails operationally:
+the exhausted approaches reached 61.84, 70.16 and 63.08 indicated g, while
+the successful approach reached 83.35 g at its endpoint. On causal prefixes
+of all four recordings, the unchanged onset-confidence checks identify a
+contact model before 75 g, with recorded maxima of approximately 34-44 g.
+This is offline signal evidence, not physical validation of a new motion.
+
+Acquisition now keeps one native HomingMove and one collector active across
+finite MCU-scheduled advances. Native analog monitoring remains armed
+throughout, including stationary host analysis and thermal checkpoints.
+The provisional search reference remains `cr.test_z - minimum_offset`, based
+on the existing permitted probe-separation range. Every advance, including
+the initial approach from clearance to that reference, now has a fixed
+0.01875 mm spatial envelope independent of speed. One largest participating
+Z step is reserved for native quantization: with the stock 0.0025 mm step,
+commanded advances are at most 0.01625 mm and the pulse-rounding allowance
+keeps travel below the envelope. Invalid step geometry rejects before motion.
+The unchanged overall floor clamps every advance. DEV's HX711 `speed` is
+2.0 mm/s; CR Touch speed, release speed and other moves are unchanged.
+
+After each segment, acquisition waits with position held for the existing
+three-sample-period budget (37.5 ms at 80 Hz). This permits original samples
+after an advance shorter than one conversion period; it does not fabricate
+timestamps, interpolate ADC samples or change filter rates. The decision
+cutoff includes stationary samples; `motion_end_time` separately records the
+last segment's native endpoint time. Fitting still begins only at the
+provisional search reference. No later descent is queued while the host
+waits, fits or fails. Host delay can extend stationary compression
+and acquisition duration, but cannot extend the queued downward segment.
+The current MCU force stop, raw band, sample/error and communication checks
+remain independent. Frozen arriving data cannot manufacture onset and can
+only consume the unchanged finite envelope. A hard-force stop, missing data,
+invalid references or an unresolved onset at the floor fails without retry.
+No firmware changes, new settings or force/sensor calibration are involved.
+The MCU sample watchdog is unchanged: its strict greater-than counter check
+can take five nominal periods (62.5 ms at 80 Hz), not three. That timeout or
+host latency cannot enlarge an already finite segment. The 75 g threshold
+remains an MCU measurement threshold, not a guaranteed peak physical force.
+This change has offline scheduling/abort coverage, not physical validation
+at 2.0 mm/s. Tiny moves with intervening sample/analysis waits do not recreate
+a continuous PRTouch descent or promise a fourfold reduction in cycle time.
+
+A reliable live onset ends normal acquisition. Its value selects the paired
+offset using the existing formula. The unchanged withdrawal estimator is
+diagnostic and may be unsupported; sensor/reference errors still reject.
+Actual MCU trigger fields remain null on a normal onset stop; separate halt
+position and segment-analysis time identify how acquisition ended. Rolling
+analysis retains at most 2048 contiguous original samples, without inventing
+timestamps or decimating the live fit. The causal decision report is retained
+separately from the bounded post-withdrawal report.
+
+Live finite advances use travel-based analysis windows. The existing nominal
+descent durations are multiplied by the commanded probe speed to determine
+spatial coverage; all selected samples keep their original real timestamps
+for the drifting-baseline model and autocorrelation checks. Stationary host
+waits therefore do not shrink the observed travel window. No new duration,
+distance, confidence threshold or setting is introduced. A window without
+enough recorded spatial coverage remains unsupported. Historical continuous
+recordings without this metadata retain their original time-window replay.
+
+The exact failed live P1 decision at 15:04 on November 3 is retained in
+`test/fixtures/load_cell_onset_segmented_20261103.json`. Wall-time windows
+reproduce `window_models_disagree`: the two-second fit is -0.335561190 mm
+and the full-window fit is -0.298357333 mm, with disjoint profile intervals.
+The same original samples selected by travel yield four supported compatible
+windows, selecting -0.302581244 mm with a 0.004302339 mm inter-window span.
+This repairs the window coverage mismatch introduced by stop-and-wait
+acquisition; it neither validates absolute physical contact nor proves
+completion of a future P1/P2 run.
+
+The subsequent 15:11-15:14 run exposed weak-signal stops: indicated peaks
+were 11.69, 11.24, 4.60 and 4.83 g. Compatible nested windows alone accepted
+curvature with selected profile-interval widths of 0.058259, 0.049983,
+0.134305 and 0.107745 mm. Those four exact causal decisions are retained in
+`test/fixtures/load_cell_false_onsets_20261103.json`.
+
+Normal acquisition now also requires the selected fit's existing profile/
+sampling interval to fit within one bounded search advance. This is an
+explicit conservative stop-precision policy, derived from the already
+computed advance budget rather than a new printer setting or correction.
+It is not a physical force limit, an absolute accuracy guarantee or proof
+that signal drift cannot mimic contact. The fit and its mathematical status
+remain unchanged; `stop_qualification` separately rejects inadequate
+localization. Such a result cannot stop normal acquisition or become an
+offset candidate. Searching may continue only inside the original endpoint
+with the native guard still armed. An unresolved floor still fails.
+
+The stop decision additionally requires observed compression, independently
+of change-point stability and fit precision. Use the selected fit's existing
+free-motion baseline and real-time drift only to detrend the observed free
+samples above its upper profile bound. Compute their RMS residual directly,
+without dividing by the square root of their count. Reuse the existing
+diagnostic force-rise criterion, max(5 times this RMS, 1 g), and its three
+consecutive confirmation samples; no new threshold or setting is added.
+All three newest samples must be below the lower profile bound, exceed that
+rise both relative to the local operational tare and above the drifting
+baseline, and be fresh within the native sample-monitor budget. An old force
+spike or an extrapolated transition cannot confirm the current stop. This
+does not establish that all externally imposed loads are nozzle contact.
+
+The four weak decisions have ordered timestamps/Z, unchanged per-contact
+tares, and latest-sample ages of 0.0003-0.0078 s. No stale replay or inter-pair
+state leak is demonstrated by them. Their recent detrended excesses are only
+about 0-5 g against roughly 10-11 g required from observed free noise. The
+defect was treating fit agreement as sufficient without this measured-load
+condition. The precision policy alone was insufficient.
+
+Each new acquisition captures its own operational tare and sample epoch;
+changed tare, pre-epoch samples, nonadvancing decision times and stale data
+reject. Original force/count/tare samples remain paired with step-history Z
+at their original timestamps. `stop_qualification.load_evidence` records the
+observations and rejection reason. The normal orchestrator also requires a
+qualified stop and qualified load evidence before forming any paired result.
+Missing/rejected evidence cannot authorize APPLY; the existing full-run
+local/spatial checks and explicit application remain mandatory.
+
+The first-P1 bootstrap limitation below remains: a native numerical homing
+seed may leave physical contact outside the existing bounded envelope.
+This change neither invents a fresh-install-safe floor nor uses 1.065 mm as
+a calibration target. It must fail when the envelope cannot support contact.
+Only a complete valid P1/P2 run can produce a provisional candidate; explicit
+APPLY/ROLLBACK and saved configuration remain unchanged.
+
+### Repeated P1 endpoint correction and bootstrap limitation (2026-11-03)
+
+The 11:37 P1 success triggered at the approach endpoint (-0.345 mm).
+The 11:38 failure was Calibrate P1 pair 2, not an initial pair; additional
+11:40/11:43 runs failed at their first P1 pair. Their recorded maximum loads
+were 61.835017, 70.164987 and 63.079725 indicated g respectively, below the
+75 g setting. Complete acquisitions and endpoint summaries are retained in
+`test/fixtures/auto_z_offset_p1_endpoints_20261103.json`. Before the first
+sample at the final Z, maximum recorded forces were lower still. There is
+no logged MCU arming acknowledgement. Native source arms/reset filters and
+dispatch for every approach; no arming defect is demonstrated by these logs.
+
+The P2 reference correction unnecessarily excluded later P1 pairs. Those
+pairs now use the same supported P1 reference and existing 0.5 mm allowance;
+the reference is still discarded on exit, and failures never trigger retries.
+
+This corrects the repeated-pair defect only. The first P1 still uses
+`floor = cr.test_z - configured_offset - retract_distance`. Its physical
+reach therefore depends on the initial offset; a 0.5 mm retraction is not
+evidence of the missing probe-to-nozzle separation on a fresh installation.
+Existing logs do not justify choosing a universally safe deeper bootstrap
+endpoint. Reusing previous-run contact depths, doubling a distance or falling
+back to the global minimum would conceal this limitation. No such change
+is made, and a new initial-contact trial is not qualified by this fix.
+
+### P2 approach reference correction (2026-11-03)
+
+The 11:07-11:08 run completed P1 but exhausted P2's HX711 approach without
+triggering. P2 CR Touch completed at test_z 1.066666667 mm; nozzle motion
+started at Z5, targeted -0.498333333 and terminated at -0.497500000 mm.
+All 928 failed-descent samples are retained with the preceding complete
+1,324-sample P1 acquisition in
+`test/fixtures/auto_z_offset_p2_no_trigger_20261103.json`.
+Indicated load rose near the endpoint but peaked at 47.316322 g, below the
+configured 75 g trigger. Raw protection and acquisition reported no error.
+The failed trace has no trigger/ascent and cannot supply a contact candidate.
+
+The old bound already included P2's -0.1325 mm relative CR Touch change.
+However, subtracting the existing 0.5 mm allowance from cr.bed_z still used
+the old 1.065 mm offset as a surface estimate. The supported P1 separation
+was 1.478893422 mm, consuming 0.413893422 mm of that allowance before the
+estimated surface; only 0.086106578 mm remained below it at P2.
+
+Later locations now translate the first supported P1 nozzle onset using
+the current relative CR Touch Z. For this recorded geometry the estimated
+P2 surface is -0.412226756 mm and the derived floor is -0.912226756 mm,
+retaining exactly the existing 0.5 mm allowance. The reference is frozen
+within a run and discarded on success/failure. P1's approach and estimate,
+force thresholds, native Z range, estimator and explicit application remain
+unchanged. This is an initial endpoint calculation from same-run evidence,
+not an automatic deeper retry after failure. Actual P2 force-trigger/model
+success still requires a future operator-controlled run; offline sequencing
+tests do not establish it.
+
+### Normal workflow uses contact onset (2026-11-03)
+
+Normal AUTO_Z_OFFSET, CALIBRATE and TEST_CONTACT now reuse the existing
+descent-onset estimator and its unmodified confidence criteria. The paired
+separation is `cr.test_z - onset.z`. Unsupported onset, invalid coordinates,
+insufficient signal or incompatible supported windows reject the pair with
+no legacy-fit fallback. No printing-offset target or new constant is used.
+The old withdrawal/descending fits, branch gap and window sensitivity remain
+diagnostics for hysteresis and relaxation; their agreement no longer gates
+the candidate. The acquisition/retraction engine, fatal errors, MCU, force,
+travel, thermal and local/spatial checks remain unchanged. A complete normal
+run must pass both preliminary pairs and all six calibration pairs before
+explicit provisional APPLY is possible. DIAGNOSTIC remains non-applying.
+
+The complete 1,327-sample hot P1 trace of November 3 at 10:52 is preserved in
+`test/fixtures/load_cell_contact_hot_20261103_1052.json`. Its onset is
+-0.205713376 mm and paired separation 1.399046709 mm. Legacy branch gap
+0.050474499 mm remains visible; it is not hidden by changing 0.025 mm.
+Three earlier cold traces also support onset; the three earlier hot traces
+remain unresolved because supported-window models disagree. Replaying P1
+data through mocked P2 delivery tests command sequencing, not actual spatial
+agreement: a new live full run must measure P2 and repeatability itself.
+No saved result or first-layer qualification follows from this offline test.
+
+Earlier sections below describe the historical qualification policies;
+this integration supersedes their normal-mode branch-agreement gate.
+
+### Unsaved first-layer trial (2026-11-03)
+
+The real two-point workflow remains `AUTO_Z_OFFSET BED_TEMP=60
+NOZZLE_TEMP=170`: preliminary P1/P2 pairs followed by three fresh pairs at
+each point. Local/spatial, thermal, raw-force and bounded-motion checks
+remain unchanged. Rejection cannot create an applicable result. Supported
+descent onset now selects the paired contact; withdrawal is diagnostic only.
+
+After a successful normal run, explicit AUTO_Z_OFFSET_APPLY consumes the
+validated candidate and sets a temporary native G-code Z correction equal to
+configured probe offset minus measured offset, with MOVE=0. The configured
+probe/endstop, sensor calibration and saved configuration are untouched.
+The old probe offset defines a coordinate origin, not the measurement target.
+The paired calculation subtracts two measurements in that same origin.
+An arbitrary initial offset can nevertheless leave contact outside the
+existing bounded approach: report failure instead of expanding travel.
+
+The temporary correction persists through native homing and the current
+PRINT_START, which does not reset it. Other macros/slicer commands that reset
+G-code Z offsets can cancel the trial. Once the print has ended or been
+cancelled, AUTO_Z_OFFSET_ROLLBACK restores the pre-trial correction without
+movement. Restart discards the temporary trial and reloads saved settings.
+Never use ACCEPT or SAVE_CONFIG merely to run this first-layer experiment.
+The trial command cannot validate physical offsets or turn unresolved onset
+into a candidate. It requires a successful normal full measurement run.
+
 ### Diagnostic descent contact onset (2026-11-02)
 
 DIAGNOSTIC=1 additionally fits `force = baseline + drift * time +

@@ -291,11 +291,23 @@ class WorkflowTests(unittest.TestCase):
                                        return_value=self.tap)
         self.factory = self.patch.start()
         self.addCleanup(self.patch.stop)
+        # Workflow fixtures supply already-supported contact coordinates;
+        # real-signal confidence is covered by the recorded-trace tests.
+        onset_patch = mock.patch.object(auto.load_cell_contact_onset,
+            'estimate', side_effect=lambda report: {'status': 'identified',
+                'z': report['descent']['z'], 'reasons': []})
+        onset_patch.start()
+        self.addCleanup(onset_patch.stop)
         self.module = auto.AutoZOffset(Config(
             self.printer, getattr(self, 'config_data', None)))
         self.module._connect()
-    def contact(self, gcmd, minimum_z=None, maximum_descent=None):
+    def contact(self, gcmd, minimum_z=None, maximum_descent=None,
+                onset_stop=None):
         floor = self.printer.primary.height-self.printer.primary.offsets[2]-.5
+        ref = self.module._approach_reference
+        if ref is not None:
+            floor = (ref['nozzle_contact_z'] + self.printer.primary.height
+                     - ref['cr_test_z'] - .5)
         self.assertAlmostEqual(minimum_z, floor)
         self.assertAlmostEqual(maximum_descent, self.module.clearance-floor)
         self.printer.trace.append(('tap',
@@ -331,7 +343,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertIs(self.printer.objects['probe'], self.printer.primary)
         self.assertEqual(set(self.printer.gcode.commands), {
             'AUTO_Z_OFFSET_CALIBRATE', 'AUTO_Z_OFFSET_TEST_CONTACT',
-            'AUTO_Z_OFFSET_ACCEPT', 'AUTO_Z_OFFSET'})
+            'AUTO_Z_OFFSET_ACCEPT', 'AUTO_Z_OFFSET',
+            'AUTO_Z_OFFSET_APPLY', 'AUTO_Z_OFFSET_ROLLBACK'})
         self.assert_no_motion_or_heat()
     def test_five_pairs_same_physical_point_and_sign(self):
         self.calibrate()

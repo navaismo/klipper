@@ -373,6 +373,22 @@ class LoadCellSampleCollector:
     def stop_collecting(self):
         return self._finish_collecting()
 
+    def snapshot_until(self, print_time, max_samples):
+        # Keep one subscription active; only the owner stops collection.
+        while not self._samples or self._samples[-1][0] < print_time:
+            now = self._reactor.monotonic()
+            if (not self.is_started or self._printer.is_shutdown()
+                    or self._mcu.estimated_print_time(now) > print_time + 1.):
+                raise self._printer.command_error(
+                    "Load cell streaming samples unavailable or stale")
+            self._reactor.pause(now + RETRY_DELAY)
+        errors = max(0, self._errors - self._start_errors)
+        overflows = max(0, self._overflows - self._start_overflows)
+        if len(self._samples) > max_samples:
+            del self._samples[:-max_samples]
+        return list(self._samples), (errors, overflows) \
+            if errors or overflows else 0
+
     # block execution until at least min_count samples are collected
     # will return all samples collected, not just up to min_count
     def collect_min(self, min_count=1):

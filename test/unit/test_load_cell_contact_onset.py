@@ -211,14 +211,14 @@ class DiagnosticOnsetTests(unittest.TestCase):
         estimator.assert_not_called()
         self.assert_not_applicable()
 
-    def test_normal_workflow_does_not_use_experimental_estimator(self):
-        # Execute the actual normal pair with a recorded branch rejection;
-        # diagnostic onset cannot silently replace its qualification policy.
-        with mock.patch.object(onset, 'estimate') as estimator:
-            with self.assertRaisesRegex(RuntimeError,
-                                        'contact_branches_disagree'):
-                self.module.cmd_AUTO_Z_OFFSET(commands.Gcmd('AUTO_Z_OFFSET'))
-        estimator.assert_not_called()
+    def test_normal_workflow_uses_supported_onset_despite_withdrawal_gap(self):
+        with mock.patch.object(onset, 'estimate', wraps=onset.estimate) as fit:
+            self.module.cmd_AUTO_Z_OFFSET(commands.Gcmd('AUTO_Z_OFFSET'))
+        self.assertEqual(fit.call_count, 8)
+        self.assertEqual(self.module.state, 'candidate')
+        self.assertAlmostEqual(self.module.result['z_offset'],
+            self.record['cr_test_z'] - onset.estimate(self.diagnostic)['z'])
+        self.printer.objects['configfile'].set.assert_not_called()
 
 
 if __name__ == '__main__':

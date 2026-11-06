@@ -2,11 +2,13 @@
 # Copyright (C) 2026
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import copy
+import json
+import os
 import unittest
 from unittest import mock
 
 import test_auto_z_offset as engine_harness
-from test_auto_z_offset import auto, Config, Gcmd, lcprobe, Printer
+from test_auto_z_offset import auto, Config, Gcmd, lcprobe, Printer, ROOT
 from test_load_cell_window_diagnostics import records, report
 
 
@@ -57,8 +59,12 @@ class DiagnosticCommandTests(unittest.TestCase):
             self.diagnostic)
         self.tap.tapping_move.get_status.return_value = {
             'last_trigger_z': self.diagnostic['mcu_trigger_z']}
-        def tap(gcmd, minimum_z=None, maximum_descent=None):
+        def tap(gcmd, minimum_z=None, maximum_descent=None, onset_stop=None):
             floor = self.primary.height - self.primary.offsets[2] - .5
+            ref = self.module._approach_reference
+            if ref is not None:
+                floor = (ref['nozzle_contact_z'] + self.primary.height
+                         - ref['cr_test_z'] - .5)
             self.assertAlmostEqual(minimum_z, floor)
             self.assertAlmostEqual(maximum_descent, 5. - floor)
             self.assertEqual(gcmd.get_command_parameters(), {})
@@ -304,12 +310,18 @@ class DiagnosticCommandTests(unittest.TestCase):
 
 
 class NativeWorkflowTests(unittest.TestCase):
-    setUpClass = classmethod(DiagnosticCommandTests.setUpClass.__func__)
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(ROOT, 'test/fixtures',
+                               'load_cell_contact_six_20261102.json')) as f:
+            cls.recorded = json.load(f)['records']
+        cls.rebuilt = [copy.deepcopy(r['diagnostic']) for r in cls.recorded]
+
     use_record = DiagnosticCommandTests.use_record
 
     def setUp(self):
         DiagnosticCommandTests.setUp(self)
-        self.use_record(2)
+        self.use_record(0)
 
     def automatic(self, **params):
         self.gcmd = Gcmd('AUTO_Z_OFFSET', params)
@@ -338,7 +350,8 @@ class NativeWorkflowTests(unittest.TestCase):
                          + [[28., 28.]] * 3 + [[110., 110.]] * 3)
         self.assertEqual(self.module.state, 'candidate')
         self.assertAlmostEqual(self.module.result['z_offset'],
-                               self.record['recorded_offset_mm'])
+            self.record['cr_test_z'] - auto.load_cell_contact_onset.estimate(
+                self.diagnostic)['z'])
         self.assertEqual(len(self.module.result['offsets']), 6)
         self.assertEqual(self.primary.start_probe_session.call_count, 8)
         self.primary.check_probe_session_bounds.assert_not_called()
@@ -352,7 +365,8 @@ class NativeWorkflowTests(unittest.TestCase):
         self.assertEqual(self.tap.tapping_move.run_tap.call_count, 6)
         self.assertEqual(self.module.state, 'candidate')
         self.assertAlmostEqual(self.module.result['z_offset'],
-                               self.record['recorded_offset_mm'])
+            self.record['cr_test_z'] - auto.load_cell_contact_onset.estimate(
+                self.diagnostic)['z'])
         self.assertFalse(any(r[0] == 'gcode' for r in self.printer.trace))
         self.assert_preserved()
 
@@ -364,7 +378,7 @@ class NativeWorkflowTests(unittest.TestCase):
 
     def test_normal_auto_model_rejection_is_not_bypassed(self):
         self.use_record(-1)
-        with self.assertRaisesRegex(RuntimeError, 'contact_branches_disagree'):
+        with self.assertRaisesRegex(RuntimeError, 'window_models_disagree'):
             self.automatic()
         self.tap.tapping_move.run_tap.assert_called_once()
         self.assertIsNone(self.module.candidate)
@@ -374,7 +388,7 @@ class NativeWorkflowTests(unittest.TestCase):
 
     def test_calibrate_model_rejection_stops_without_extra_pairs(self):
         self.use_record(-1)
-        with self.assertRaisesRegex(RuntimeError, 'contact_branches_disagree'):
+        with self.assertRaisesRegex(RuntimeError, 'window_models_disagree'):
             self.module.cmd_CALIBRATE(Gcmd('AUTO_Z_OFFSET_CALIBRATE'))
         self.tap.tapping_move.run_tap.assert_called_once()
         self.assertIsNone(self.module.candidate)
@@ -448,7 +462,8 @@ class NativeWorkflowTests(unittest.TestCase):
         self.assert_preserved()
 
     def test_no_trigger_in_normal_workflow_retracts_without_retry(self):
-        def no_trigger(gcmd, minimum_z=None, maximum_descent=None):
+        def no_trigger(gcmd, minimum_z=None, maximum_descent=None,
+                       onset_stop=None):
             self.assertGreater(minimum_z, -3.)
             self.printer.toolhead.position[2] = minimum_z
             raise RuntimeError('No trigger on probe after full movement')

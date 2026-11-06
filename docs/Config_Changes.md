@@ -1,5 +1,25 @@
 # Configuration Changes
 
+20261103 (fork onset-controlled acquisition): Auto Z-offset nozzle searches
+now use finite MCU-scheduled advances and the existing descent-onset
+confidence checks, with the native analog force guard armed continuously.
+A normal stop no longer requires reaching trigger_force; that setting and
+raw force limits remain independent MCU protections. An actual hard-force
+stop without supported onset rejects. Existing floors are unchanged, with
+no deeper retry or global-minimum fallback. No new options or MCU update
+are required. Normal onset stops report null MCU force-trigger fields and
+separate contact-stop metadata; withdrawal fit failures alone are diagnostic.
+The estimator, measured-offset formula, explicit APPLY/ROLLBACK and saved
+calibration are unchanged. Arbitrary initial offsets do not establish a
+fresh-install-safe search envelope; out-of-envelope acquisition still fails.
+
+20261103 (fork normal contact onset): Normal Auto Z-offset commands now use
+the existing supported descent-onset estimate. Withdrawal/branch agreement
+is diagnostic only; offset_tolerance still limits within-point repeatability
+and remains in the legacy branch report. Unresolved onset rejects without a
+legacy-fit fallback. No new configuration or MCU update is required. Motion,
+thermal/raw-force limits and explicit application/rollback are unchanged.
+
 20261102 (fork diagnostic contact onset): DIAGNOSTIC=1 additionally estimates
 descent onset against a drifting baseline. Diagnostic state follows onset
 support; the original withdrawal/branch verdict is informational in this mode.

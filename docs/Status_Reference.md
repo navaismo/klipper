@@ -464,7 +464,7 @@ The following information is available for each `[load_cell name]`:
 The following information is available for `[auto_z_offset]`:
 
 - `state`: `disconnected`, `idle`, `heating`, `measuring`, `contact_ready`,
-  `candidate`, `rejected`, `accepted`, `diagnostic_complete`,
+  `candidate`, `rejected`, `accepted`, `provisional`, `diagnostic_complete`,
   `diagnostic_rejected`, or `error`. Diagnostic completion only describes
   diagnostic descent-onset support; it never qualifies an offset for
   application. The original withdrawal/branch comparison is informational
@@ -478,6 +478,13 @@ The following information is available for `[auto_z_offset]`:
   the failed step and include it in `error` and the command error message.
 - `verified_points`: Sorted one-based indices of qualified configured points.
 - `candidate`: Whether an unaccepted validated result is available.
+- `provisional`: Null or the unsaved print-trial record created by explicit
+  AUTO_Z_OFFSET_APPLY: measured `z_offset`, `configured_z_offset`, the
+  replacement `gcode_z_offset`, and `previous_gcode_z_offset` for rollback.
+  Values are in mm. This records the applied correction, not a live check of
+  external SET_GCODE_OFFSET or RESTORE_GCODE_STATE commands. Native homing
+  retains the trial and rollback record while invalidating the candidate.
+  Rollback clears the record; restart discards all unsaved trial state.
 - `result`: Null or an object with flattened paired `offsets`, global
   `minimum`, `maximum`, and `range`, in mm. `points` contains one report per
   location: `point_index`, physical XY `point`, local `offsets`, `median`,
@@ -497,13 +504,85 @@ The following information is available for `[auto_z_offset]`:
   Contains one-based `point_index` and `sample_index`, `point` (physical bed
   XY), `cr_trigger_z`, `force_trigger_z`,
   `regression_z`, `regression_delta` (regression minus force-trigger Z),
-  `offset` (null for a rejected model), `model_offset` (the unmodified numerical
-  formula result), `saved_offset`, and `mesh_active` (False for these
+  `contact_stop_z` (actual halt Z) and `stop_reason` (`onset` for a normal
+  onset-controlled acquisition, `force` for historical force-triggered taps).
+  A normal onset stop has null `force_trigger_z` and `regression_delta`:
+  it must not fabricate a force-trigger position. `regression_z` and
+  `model_offset` are null when the diagnostic withdrawal fit is unavailable.
+  The tap JSON separates actual MCU `trigger_time` from `descent_end_time`,
+  the final finite segment's analysis boundary in MCU print-time coordinates.
+  For an onset stop, `contact_stop_time` is that analysis boundary, not an
+  exact physical stop-edge timestamp. `contact_stop_z` is the halt position
+  reconstructed by native homing from step counters. `stop_region` and
+  sensitivity `time_reference: descent_end_time` distinguish it from a
+  genuine MCU trigger region.
+  The tap report's `contact_stop` records `reason`, `stop_z`, `stop_time`,
+  `onset`, the causal `decision_report`, `max_search_segment_mm`,
+  `segment_count`, and `search_start_z`.
+  `stop_qualification` separately records `qualified`, `reasons`,
+  `selected_interval_width_mm`, `maximum_interval_width_mm` and
+  `physical_contact_verified` (False). Normal acquisition requires the
+  selected window's existing profile/sampling interval to fit within one
+  search advance; otherwise mathematical identification cannot stop it.
+  The maximum width is the existing `max_search_segment_mm`, not a new
+  setting or physical-accuracy guarantee. Failed approaches retain this
+  verdict inside `motion.onset_decision.stop_qualification`.
+  `load_evidence` verdict contains `qualified`, `reason`,
+  `confirmation_samples`, `noise_multiplier`, `minimum_rise_g` and, when
+  computable, `free_sample_count`, `noise_rms_g`, `required_rise_g`,
+  `minimum_recent_force_g`, `minimum_recent_excess_g`, `sample_times` and
+  `sample_z`. It uses actual newest samples, not the fitted compression
+  amplitude. Missing/stale evidence, changed tare, an unobserved transition
+  or insufficient sustained compression cannot qualify a normal stop.
+  The causal report includes `operational_tare_counts`,
+  `previous_descent_end_time` and `maximum_sample_age_s` (the existing MCU
+  sample-monitor budget). These are acquisition references, not new settings.
+  The decision report uses only
+  samples at or before its analysis boundary, with original timestamps,
+  raw counts, tare and step-history Z. A rolling contiguous window retains
+  at most 2048 samples without resampling; final withdrawal reporting is
+  likewise bounded. `motion.raw_sample_retention` records that limit.
+  A failed approach retains `motion.onset_decision`: the last actual live
+  `report` and `result`, `segment_count`, `max_search_segment_mm` and
+  `host_error`. The report preserves the exact contiguous causal input to
+  that decision; the surrounding failure log may separately be decimated.
+  Native `trigger_time` and `raw_z` are recorded before rejecting a hard-force
+  stop when native homing returned them. A native safety error before that
+  return leaves unavailable trigger fields unset; no trigger is invented.
+  Onset support describes the fitted signal, not verified absolute physical
+  contact accuracy. The same pair also contains
+  `offset` (onset-derived paired separation, null for a rejected onset or
+  DIAGNOSTIC mode), `model_offset` (legacy withdrawal-based separation),
+  `saved_offset`, and `mesh_active` (False for these
   measurements). `contact_bounds` records `minimum_z`, `maximum_descent`,
-  and the fresh CR Touch `surface_reference_z` for the nozzle approach.
+  the estimated `surface_reference_z` for the nozzle approach, and native
+  `cr_bed_z`. `approach_reference` is null for the initial P1 approach;
+  later pairs, including P1 calibration repeats, retain the first supported
+  P1 `cr_test_z`,
+  `nozzle_contact_z` and reference `fingerprint` from that same run. The
+  estimated later surface translates this nozzle reference by the fresh
+  relative CR Touch measurement; the existing overtravel distance is
+  unchanged. The internal reference is discarded on every run's exit.
   All positions/distances are in mm in the toolhead frame. Also contains
   `temperatures_before` and `temperatures_after`: each has `bed` and `nozzle`
   objects with `measured` and `target` in C, sampled around the nozzle tap.
+  `contact_estimator` is `descent_onset` or `prtouch`; `contact_z` is its Z
+  or null. `onset_qualification` contains `status` (`supported` or `rejected`),
+  `reasons` and `eligible_for_candidate` (always False in DIAGNOSTIC mode).
+  This is a per-pair verdict, not authorization to apply: the complete normal
+  run must still pass local/spatial checks and explicit APPLY is required.
+  All pair reports retain `eligible_for_application: False`.
+  `configured_contact_estimator` at the top level is `current` (default) or
+  `prtouch`. `estimator_comparison` in each contact report contains `lcbestfit`,
+  `current` and `prtouch`; the PRTouch entry includes `status` (`identified`
+  or `not_evaluable`), original sample `time`/`z`, `observational_offset`,
+  filtered ADC counts, source parameters and explicit replay limitations.
+  `estimator_qualification` describes the selected numerical estimate; its
+  `eligible_for_candidate` does not authorize application. PRTouch always
+  has `eligible_for_application: False`; a complete consistent PRTouch run
+  ends in `comparison_complete` with no apply/accept candidate. Its result
+  identifies `contact_estimator: prtouch` and remains non-applicable even
+  when the numerical local/spatial checks pass.
   This report is available after TEST_CONTACT without staging an offset.
   Local DEV `AUTO_Z_OFFSET DIAGNOSTIC=1` also retains this report, with
   `diagnostic_only: True`, `eligible_for_application: False`,
@@ -516,16 +595,27 @@ The following information is available for `[auto_z_offset]`:
   and no point is qualified, regardless of model consistency. The nested
   model's `eligible_for_candidate` is a mathematical verdict only and cannot
   authorize application in this mode.
-  `contact_onset` is the diagnostic descent-only result: `status`
+  `contact_onset`, present in normal and diagnostic runs, is the existing
+  descent-only mathematical result: `status`
   (`identified` or `unresolved`), `z` (null when unresolved), `reasons`,
   `observational_offset` (cr.test_z minus z, or null),
   `withdrawal_minus_onset_mm`, `supported_window_count`, and `windows`.
-  It always has `diagnostic_only: True`, `eligible_for_application: False`;
+  The mathematical result retains `diagnostic_only: True` and
+  `eligible_for_application: False`: it cannot itself authorize application.
+  Normal orchestration uses its confidence verdict, never these flags as
+  an acceptance token. In all cases,
   physical accuracy is unvalidated and physical uncertainty remains unknown.
   Supported results expose `selected_window_s`, the local
   `baseline_force_g` at `baseline_time_s`, `baseline_drift_g_per_s`,
   `baseline_rms_g`, `compression_slope_g_per_mm`, `effective_samples`,
   and `delta_bic` (evidence against a drifting-baseline-only model).
+  For live finite advances, `window_basis: travel` and `window_speed_mm_s`
+  identify spatial coverage. Each window retains its nominal `window_s`
+  and adds `window_basis` and `travel_span_mm` (duration times probe speed;
+  null for the full retained acquisition). Actual `time_bounds_s` may span
+  much longer than `window_s`, since waits do not consume travel coverage.
+  Baseline drift, noise and confidence calculations still use original
+  sample timestamps. Recordings without this metadata use time windows.
   Windows retain `model_z` even when unresolved, but only supported windows
   have non-null `z`. They report sample/effective counts per fitted region,
   residual RMS, baseline drift, compression slope, the correlation-adjusted
@@ -534,7 +624,9 @@ The following information is available for `[auto_z_offset]`:
   The nominal 95% profile convention is approximate and model-conditional;
   it is not a calibrated physical-contact confidence level. Shared sensor
   delay, force-transfer bias and model misspecification remain unknown.
-  `contact_qualification` contains `status` (`rejected` or
+  `contact_qualification` is now the legacy withdrawal/branch diagnostic,
+  which cannot veto a supported onset or authorize a candidate. It contains
+  `status` (`rejected` or
   `internally_consistent`), `eligible_for_candidate`, reason codes in
   `reasons`, `maximum_span_mm` (the configured offset tolerance),
   `branch_disagreement_mm`, and, when available, `descent_fit_z`,

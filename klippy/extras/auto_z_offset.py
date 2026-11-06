@@ -8,6 +8,7 @@ import math
 import uuid
 from . import load_cell_contact, load_cell_contact_onset
 from . import load_cell_diagnostics, load_cell_probe
+from . import load_cell_prtouch_estimator
 from . import manual_probe
 
 
@@ -21,6 +22,8 @@ class AutoZOffset:
         self.primary = self.printer.load_object(config, 'bltouch')
         self.load_cell = self.printer.load_object(
             config, 'load_cell ' + config.get('load_cell'))
+        self.contact_estimator = config.getchoice(
+            'contact_estimator', ['current', 'prtouch'], 'current')
         if config.get('probe_points', None) is not None:
             if config.get('probe_point', None) is not None:
                 raise config.error("Use probe_points or probe_point, not both")
@@ -83,6 +86,8 @@ class AutoZOffset:
         self.connected = self.busy = self.contact_verified = False
         self.verified_points = {}
         self.candidate = self.result = self.error = None
+        self.provisional = None
+        self._approach_reference = None
         self.last_contact = None
         self.stage = None
         self.state = 'disconnected'
@@ -110,6 +115,10 @@ class AutoZOffset:
             self.cmd_CALIBRATE, desc="Measure paired CR Touch/nozzle offsets")
         self.gcode.register_command('AUTO_Z_OFFSET_ACCEPT',
             self.cmd_ACCEPT, desc="Stage the validated CR Touch Z offset")
+        self.gcode.register_command('AUTO_Z_OFFSET_APPLY',
+            self.cmd_APPLY, desc="Apply a candidate for an unsaved print trial")
+        self.gcode.register_command('AUTO_Z_OFFSET_ROLLBACK',
+            self.cmd_ROLLBACK, desc="Restore the pre-trial G-code Z offset")
         self.gcode.register_command('AUTO_Z_OFFSET', self.cmd_AUTO_Z_OFFSET,
             desc="Test both points and measure the CR Touch Z offset")
 
@@ -177,16 +186,24 @@ class AutoZOffset:
                     record['tap_link'] = {key: motion.get(key) for key in (
                         'name', 'tap_id', 'collector_start_time',
                         'trigger_time', 'raw_z')}
-                record['regression_z'] = pos[2] if pos is not None else None
+                soft = isinstance(motion, dict) and bool(
+                    motion.get('contact_stop'))
+                record['result_z'] = pos[2] if pos is not None else None
+                record['result_kind'] = 'onset' if soft else 'withdrawal_fit'
+                record['regression_z'] = fields.get('primary_fit_z',
+                    pos[2] if pos is not None and not soft else None)
                 record['mcu_trigger_z'] = (trigger_z if trigger_z is not None
                     else motion.get('raw_z')
-                    if isinstance(motion, dict) else None)
+                    if isinstance(motion, dict)
+                    and motion.get('trigger_time') else None)
             if offset is not None:
+                contact_z = fields.get('contact_z', pos[2])
                 record['formula'] = {'candidate': offset,
                     'cr_test_z': cr.test_z, 'cr_bed_z': cr.bed_z,
-                    'nozzle_regression_z': pos[2],
+                    'nozzle_regression_z': fields.get('primary_fit_z', pos[2]),
+                    'nozzle_contact_z': contact_z,
                     'candidate_from_active_offset': offsets[2]
-                        + cr.bed_z - pos[2] if offsets else None}
+                        + cr.bed_z - contact_z if offsets else None}
             if error is not None:
                 record['error'] = str(error)[:160]
             logging.info('Auto Z-offset frame: %s',
@@ -436,9 +453,17 @@ class AutoZOffset:
         self._frame_event('before_cr')
         cr = self._probe()
         self._frame_event('after_cr', cr=cr)
-        floor, distance = self._nozzle_bounds(cr, tap_gcmd)
+        approach_reference = self._approach_reference
+        if (approach_reference is not None
+                and (approach_reference['fingerprint'] != fingerprint
+                     or fingerprint != self._fingerprint())):
+            raise gcmd.error("Nozzle approach reference changed; no descent")
+        floor, distance = self._nozzle_bounds(cr, tap_gcmd, approach_reference)
+        surface = self._nozzle_surface(cr, approach_reference)
         self._frame_event('nozzle_bounds', cr=cr, minimum_z=floor,
-                          maximum_descent=distance)
+                          maximum_descent=distance,
+                          surface_reference_z=surface,
+                          approach_reference=approach_reference)
         self._check_thermal(targets)
         self._frame_event('before_nozzle_xy', cr=cr)
         self._position(point)
@@ -455,7 +480,9 @@ class AutoZOffset:
         self._frame_event('before_tap', cr=cr)
         try:
             pos, valid = self.tap.tapping_move.run_tap(
-                tap_gcmd, minimum_z=floor, maximum_descent=distance)
+                tap_gcmd, minimum_z=floor, maximum_descent=distance,
+                onset_stop={'checkpoint': lambda: self._check_thermal(targets),
+                            'search_start_z': cr.test_z - self.min_offset})
         except Exception as exc:
             self._frame_event('tap_failed', cr=cr, error=exc)
             raise
@@ -464,71 +491,168 @@ class AutoZOffset:
         self._check_thermal(targets)
         if not valid or not self._finite(pos[2]):
             raise gcmd.error("Invalid nozzle contact measurement")
-        # Direct measured separation; the old offset only defines
-        # the coordinate origin shared by both measurements.
-        offset = cr.test_z - pos[2]
-        trigger_z = self.tap.tapping_move.get_status(
-            self.reactor.monotonic())['last_trigger_z']
-        if trigger_z is None or not self._finite(trigger_z):
-            raise gcmd.error("Missing force trigger position")
-        if not self._finite(offset) or not \
-                self.min_offset <= offset <= self.max_offset:
-            raise gcmd.error("Measured Z-offset outside valid range")
         diagnostic = self.tap.tapping_move.get_contact_diagnostics()
+        status = self.tap.tapping_move.get_status(self.reactor.monotonic())
+        stop = diagnostic.get('contact_stop') \
+            if isinstance(diagnostic, dict) else None
+        soft_stop = isinstance(stop, dict) and stop.get('reason') == 'onset'
+        if soft_stop:
+            stop_quality = stop.get('stop_qualification')
+            evidence = stop_quality.get('load_evidence') \
+                if isinstance(stop_quality, dict) else None
+            if (not isinstance(stop_quality, dict)
+                    or stop_quality.get('qualified') is not True
+                    or not isinstance(evidence, dict)
+                    or evidence.get('qualified') is not True):
+                raise gcmd.error(
+                    'Onset stop lacks confirmed load; no candidate')
+        trigger_z = status['last_trigger_z']
+        regression_z = status.get('last_regression_z') if soft_stop else pos[2]
+        stop_z = status.get('last_stop_z') if soft_stop else trigger_z
+        if (stop_z is None or not self._finite(stop_z)
+                or (not soft_stop and (trigger_z is None
+                    or not self._finite(trigger_z)))):
+            raise gcmd.error("Missing contact stop position" if soft_stop else
+                             "Missing force trigger position")
+        # Withdrawal may be unsupported; never label an onset as that fit.
+        model_offset = cr.test_z - regression_z \
+            if regression_z is not None else None
         qualification = load_cell_contact.qualify_contact(
-            diagnostic, pos[2], self.tolerance)
+            diagnostic, regression_z, self.tolerance)
         sensitivity = diagnostic.get('window_sensitivity') \
             if isinstance(diagnostic, dict) else None
-        qualified = qualification['eligible_for_candidate']
+        try:
+            onset = load_cell_contact_onset.estimate(
+                stop['decision_report'] if soft_stop else diagnostic)
+        except Exception:
+            load_cell_diagnostics.warn('contact onset estimation')
+            onset = {'status': 'unresolved', 'z': None,
+                'diagnostic_only': True, 'eligible_for_application': False,
+                'reasons': ['estimator_error']}
+        onset_z = load_cell_diagnostics.number(onset.get('z'))
+        offset = cr.test_z - onset_z if onset_z is not None else None
+        reasons = list(onset['reasons'])
+        if onset['status'] == 'identified':
+            if onset_z is None:
+                reasons.append('invalid_contact_onset_z')
+            elif not self._finite(offset) or not \
+                    self.min_offset <= offset <= self.max_offset:
+                reasons.append('offset_outside_valid_range')
+        qualified = onset['status'] == 'identified' and not reasons
+        branches = diagnostic if isinstance(diagnostic, dict) else {}
+        ascent_z = branches.get('ascent_fit_z')
+        onset['observational_offset'] = offset
+        onset['withdrawal_minus_onset_mm'] = (ascent_z - onset_z
+            if ascent_z is not None and onset_z is not None else None)
+        onset_qualification = {'eligible_for_candidate': qualified
+            and not diagnostic_only and self.contact_estimator == 'current',
+            'reasons': reasons,
+            'status': 'supported' if qualified else 'rejected'}
+        # Both independent contact estimators observe the same descent rows.
+        # Acquisition and later travel references remain owned by the current
+        # onset-stop path; a comparison must never alter motion or its bounds.
+        try:
+            prtouch = load_cell_prtouch_estimator.estimate(
+                stop['decision_report'] if soft_stop else diagnostic,
+                sample_period=branches.get('motion', {}).get('sample_period'))
+        except Exception:
+            load_cell_diagnostics.warn('PRTouch comparison')
+            prtouch = {'status': 'not_evaluable', 'z': None,
+                'reasons': ['estimator_error'], 'diagnostic_only': True,
+                'eligible_for_application': False}
+        prtouch_z = load_cell_diagnostics.number(prtouch.get('z'))
+        prtouch_offset = cr.test_z - prtouch_z \
+            if prtouch_z is not None else None
+        prtouch['observational_offset'] = prtouch_offset
+        comparison = {
+            'lcbestfit': {'z': regression_z, 'offset': model_offset,
+                'descent_z': branches.get('descent_fit_z'),
+                'withdrawal_z': branches.get('ascent_fit_z'),
+                'diagnostic_only': True, 'eligible_for_application': False},
+            'current': onset, 'prtouch': prtouch}
+        selected_z, selected_offset = onset_z, offset
+        estimator_name = 'descent_onset'
+        selected_reasons, selected_qualified = reasons, qualified
+        if self.contact_estimator == 'prtouch':
+            estimator_name = 'prtouch'
+            selected_z, selected_offset = prtouch_z, prtouch_offset
+            selected_reasons = list(prtouch['reasons'])
+            if selected_offset is not None and not (
+                    self._finite(selected_offset) and self.min_offset
+                    <= selected_offset <= self.max_offset):
+                selected_reasons.append('offset_outside_valid_range')
+            selected_qualified = (prtouch['status'] == 'identified'
+                                  and selected_z is not None
+                                  and not selected_reasons)
+        estimator_qualification = {
+            'status': 'supported' if selected_qualified else 'rejected',
+            'reasons': selected_reasons,
+            'eligible_for_candidate': selected_qualified
+                and not diagnostic_only,
+            'eligible_for_application': False}
         self._frame_event('pair_result', cr=cr, pos=pos,
-                          trigger_z=trigger_z, offset=offset,
+                          trigger_z=trigger_z, offset=selected_offset,
+                          primary_fit_z=regression_z,
+                          contact_z=selected_z,
+                          contact_estimator=estimator_name,
                           contact_qualification=qualification,
+                          onset_qualification=onset_qualification,
+                          estimator_comparison=comparison,
+                          estimator_qualification=estimator_qualification,
                           window_sensitivity=sensitivity,
                           diagnostic_only=diagnostic_only)
         self.last_contact = {
             'point_index': point_index + 1, 'sample_index': sample_index + 1,
             'point': list(point), 'cr_trigger_z': cr.test_z,
-            'force_trigger_z': trigger_z, 'regression_z': pos[2],
-            'regression_delta': pos[2] - trigger_z,
-            'offset': offset if qualified and not diagnostic_only else None,
-            'model_offset': offset,
+            'force_trigger_z': trigger_z, 'regression_z': regression_z,
+            'regression_delta': regression_z - trigger_z
+                if regression_z is not None and trigger_z is not None else None,
+            'contact_stop_z': stop_z,
+            'stop_reason': 'onset' if soft_stop else 'force',
+            'offset': selected_offset
+                if selected_qualified and not diagnostic_only else None,
+            'model_offset': model_offset,
+            'contact_estimator': estimator_name, 'contact_z': selected_z,
+            'contact_onset': onset,
+            'prtouch': prtouch, 'estimator_comparison': comparison,
+            'estimator_qualification': estimator_qualification,
+            'onset_qualification': onset_qualification,
             'contact_qualification': qualification,
             'window_sensitivity': sensitivity,
             'saved_offset': fingerprint[0][2], 'mesh_active': False,
             'contact_bounds': {'minimum_z': floor,
                                'maximum_descent': distance,
-                               'surface_reference_z': cr.bed_z},
+                               'surface_reference_z': surface,
+                               'cr_bed_z': cr.bed_z,
+                               'approach_reference': approach_reference},
             'temperatures_before': before, 'temperatures_after': after}
-        if diagnostic_only:
-            branches = diagnostic if isinstance(diagnostic, dict) else {}
-            self.last_contact.update({
-                'diagnostic_only': True, 'eligible_for_application': False,
-                'descent_fit_z': branches.get('descent_fit_z'),
-                'ascent_fit_z': branches.get('ascent_fit_z'),
-                'descent_status': branches.get('descent', {}).get(
-                    'status', 'unavailable'),
-                'ascent_status': branches.get('ascent', {}).get(
-                    'status', 'unavailable'),
-                'primary_fit_z': pos[2], 'observational_offset': offset})
-            try:
-                onset = load_cell_contact_onset.estimate(diagnostic)
-            except Exception:
-                load_cell_diagnostics.warn('contact onset estimation')
-                onset = {'status': 'unresolved', 'z': None,
-                    'diagnostic_only': True, 'eligible_for_application': False,
-                    'reasons': ['estimator_error']}
-            onset_z = onset['z']
-            onset['observational_offset'] = (cr.test_z - onset_z
-                if onset_z is not None else None)
-            ascent_z = branches.get('ascent_fit_z')
-            onset['withdrawal_minus_onset_mm'] = (ascent_z - onset_z
-                if ascent_z is not None and onset_z is not None else None)
-            self.last_contact['contact_onset'] = onset
+        self.last_contact.update({
+            'diagnostic_only': diagnostic_only,
+            'eligible_for_application': False,
+            'descent_fit_z': branches.get('descent_fit_z'),
+            'ascent_fit_z': branches.get('ascent_fit_z'),
+            'descent_status': branches.get('descent', {}).get(
+                'status', 'unavailable'),
+            'ascent_status': branches.get('ascent', {}).get(
+                'status', 'unavailable'),
+            'primary_fit_z': regression_z,
+            'observational_offset': model_offset})
         gcmd.respond_info(
-            "Contact at X%.3f Y%.3f: force_trigger_z=%.6f mm, "
-            "regression_z=%.6f mm, difference=%.6f mm"
-            % (point[0], point[1], trigger_z, pos[2], pos[2] - trigger_z))
+            "Contact at X%.3f Y%.3f: force_trigger_z=%s mm, "
+            "regression_z=%s mm, contact_stop_z=%.6f mm; stop=%s"
+            % (point[0], point[1],
+               '%.6f' % trigger_z if trigger_z is not None else 'unavailable',
+               '%.6f' % regression_z if regression_z is not None
+               else 'unavailable', stop_z,
+               self.last_contact['stop_reason']))
         logging.info("Auto Z-offset contact: %s", self.last_contact)
+        gcmd.respond_info(
+            'Contact estimators: LCBestFit z=%s offset=%s; current z=%s '
+            'offset=%s; PRTouch status=%s z=%s offset=%s; selected=%s; '
+            'PRTouch comparison only, no apply or save; reasons=%s'
+            % (regression_z, model_offset, onset_z, offset,
+               prtouch['status'], prtouch_z, prtouch_offset,
+               self.contact_estimator, ', '.join(prtouch['reasons']) or 'none'))
         if sensitivity is not None:
             try:
                 spans = [load_cell_diagnostics.number(
@@ -550,13 +674,17 @@ class AutoZOffset:
             gcmd.respond_info(
                 "Auto Z-offset diagnostic P1: cr_test_z=%.6f mm, "
                 "descent_fit_z=%s mm, "
-                "ascent_fit_z=%s mm, primary_fit_z=%.6f mm, "
-                "observational_offset=%.6f mm; "
+                "ascent_fit_z=%s mm, primary_fit_z=%s mm, "
+                "observational_offset=%s mm; "
                 "descent_status=%s; ascent_status=%s; "
                 "legacy_branch_verdict=%s; branch_difference=%s mm; "
                 "reasons=%s; "
                 "no candidate, no apply or save"
-                % (cr.test_z, fitted[0], fitted[1], pos[2], offset,
+                % (cr.test_z, fitted[0], fitted[1],
+                   '%.6f' % regression_z if regression_z is not None
+                   else 'unavailable',
+                   '%.6f' % model_offset if model_offset is not None
+                   else 'unavailable',
                    self.last_contact['descent_status'],
                    self.last_contact['ascent_status'], qualification['status'],
                    qualification['branch_disagreement_mm'],
@@ -570,24 +698,38 @@ class AutoZOffset:
                    ', '.join(onset['reasons']) or 'none'))
             # Only model rejection is observational. Safety errors above still
             # propagate, and the original tap/retraction has already finished.
-            return offset
-        if not qualified:
-            raise gcmd.error("Unreliable contact model: %s; "
-                "branch difference=%s mm, allowed span=%.6f mm; no candidate"
-                % (', '.join(qualification['reasons']),
-                   qualification['branch_disagreement_mm'], self.tolerance))
+            return selected_offset
+        if not selected_qualified:
+            raise gcmd.error("Unreliable contact %s: %s; no candidate"
+                % ('onset' if self.contact_estimator == 'current' else
+                   'PRTouch estimate', ', '.join(selected_reasons) or
+                   (onset if self.contact_estimator == 'current'
+                    else prtouch)['status']))
+        if point_index == 0 and self._approach_reference is None:
+            # Anchor later locations to this run's supported nozzle contact,
+            # not to a surface inferred using the old configured Z offset.
+            if not qualified:
+                raise gcmd.error('Missing acquisition approach reference; '
+                                 'PRTouch comparison cannot change travel')
+            self._approach_reference = {'cr_test_z': cr.test_z,
+                'nozzle_contact_z': onset_z, 'fingerprint': fingerprint}
+        gcmd.respond_info("Descent contact onset: z=%.6f mm; offset=%.6f mm; "
+            "window span=%s mm; withdrawal difference=%s mm (diagnostic only)"
+            % (onset_z, offset, onset.get('window_span_mm'),
+               onset['withdrawal_minus_onset_mm']))
         logging.info(
             "Auto Z-offset point %d pair %d: saved=%.6f cr_trigger_z=%.6f "
             "cr_bed_z=%.6f nozzle_contact_z=%.6f offset=%.6f",
             point_index + 1, sample_index + 1, fingerprint[0][2], cr.test_z,
-            cr.bed_z, pos[2], offset)
+            cr.bed_z, selected_z, selected_offset)
         if len(self.points) == 1:
             gcmd.respond_info("Z-offset pair %d: %.6f mm"
-                              % (sample_index + 1, offset))
+                              % (sample_index + 1, selected_offset))
         else:
             gcmd.respond_info("Point %d pair %d: %.6f mm"
-                              % (point_index + 1, sample_index + 1, offset))
-        return offset
+                              % (point_index + 1, sample_index + 1,
+                                 selected_offset))
+        return selected_offset
 
     @staticmethod
     def _median(values):
@@ -607,7 +749,9 @@ class AutoZOffset:
         self.result = {'points': point_results, 'offsets': offsets,
             'minimum': min(offsets), 'maximum': max(offsets),
             'range': max(offsets) - min(offsets), 'spatial_range': spread,
-            'valid': valid,
+            'valid': valid, 'contact_estimator': self.contact_estimator,
+            'eligible_for_application': valid
+                and self.contact_estimator == 'current',
             'z_offset': offset if valid else None}
         if not valid:
             self.state = 'rejected'
@@ -616,6 +760,14 @@ class AutoZOffset:
             gcmd.respond_info(self.error + "; no global candidate. "
                               "Inspect the point reports; no save.")
             return
+        if self.contact_estimator == 'prtouch':
+            self.candidate = None
+            self.state = 'comparison_complete'
+            gcmd.respond_info(
+                'PRTouch observational z_offset: %.6f mm; physical validation '
+                'pending. Comparison only; APPLY and ACCEPT unavailable; '
+                'no apply or save.' % (offset,))
+            return
         self.candidate = fingerprint
         self.state = 'candidate'
         if len(self.points) == 2:
@@ -623,12 +775,17 @@ class AutoZOffset:
                               "agreement without averaging.")
         gcmd.respond_info(
             "CR Touch z_offset: %.6f mm (range %.6f mm; spatial %.6f mm).\n"
-            "Inspect the result; confirm with AUTO_Z_OFFSET_ACCEPT."
+            "Inspect the result; AUTO_Z_OFFSET_APPLY starts an unsaved "
+            "trial; AUTO_Z_OFFSET_ACCEPT only stages configuration."
             % (self.result['z_offset'], self.result['range'], spread))
 
     def _run(self, gcmd, contact_only, automatic=False, diagnostic=False):
         if self.busy:
             raise gcmd.error("Auto Z-offset is already running")
+        if self.provisional is not None:
+            raise gcmd.error("Run AUTO_Z_OFFSET_ROLLBACK "
+                             "before measuring again")
+        self._approach_reference = None
         self.stage = 'preflight'
         try:
             self._execute_run(gcmd, contact_only, automatic, diagnostic)
@@ -638,13 +795,21 @@ class AutoZOffset:
             raise gcmd.error(self.error)
         finally:
             self._cold_contact = False
+            self._approach_reference = None
 
-    def _nozzle_bounds(self, cr, tap_gcmd):
-        # Use the fresh native probe surface reference in this coordinate
-        # frame. The existing tap retract distance also bounds overtravel.
+    @staticmethod
+    def _nozzle_surface(cr, reference):
+        if reference is None:
+            return cr.bed_z
+        return (reference['nozzle_contact_z'] + cr.test_z
+                - reference['cr_test_z'])
+
+    def _nozzle_bounds(self, cr, tap_gcmd, reference=None):
+        # Preserve the existing overtravel allowance below the estimated
+        # surface, translated from P1 when a same-run contact is available.
         retract = self.tap.param_helper.get_probe_params(tap_gcmd)[
             'load_cell_retract_dist']
-        surface = cr.bed_z
+        surface = self._nozzle_surface(cr, reference)
         floor = surface - retract
         low = self.toolhead.get_status(self.reactor.monotonic())[
             'axis_minimum'][2]
@@ -816,11 +981,11 @@ class AutoZOffset:
                 self._update_lcd(lcd, 'computing')
                 if fingerprint != self._fingerprint():
                     raise gcmd.error("Calibration references changed")
-                onset = self.last_contact['contact_onset']
+                selected = self.last_contact['estimator_qualification']
                 self.state = ('diagnostic_complete'
-                    if onset['status'] == 'identified'
+                    if selected['status'] == 'supported'
                     else 'diagnostic_rejected')
-                self.error = ', '.join(onset['reasons']) or None
+                self.error = ', '.join(selected['reasons']) or None
             else:
                 point_results = self._measure_points(
                     gcmd, tap_gcmd, targets, point_indices, contact_only,
@@ -843,7 +1008,7 @@ class AutoZOffset:
             rejected_contact = self.last_contact
             if (rejected_contact is not None
                     and not rejected_contact.get('diagnostic_only', False)
-                    and rejected_contact.get('contact_qualification', {}).get(
+                    and rejected_contact.get('onset_qualification', {}).get(
                         'eligible_for_candidate', True)):
                 rejected_contact = None
             self._invalidate()
@@ -926,16 +1091,79 @@ class AutoZOffset:
             raise gcmd.error("Unsupported AUTO_Z_OFFSET diagnostic parameter")
         self._run(gcmd, True, diagnostic=True)
 
-    def cmd_ACCEPT(self, gcmd):
+    def _validated_candidate(self, gcmd):
         self._check_idle()
-        if (self.busy or self.candidate is None or self.result is None
+        if (self.contact_estimator == 'prtouch'
+                or (self.result is not None
+                    and self.result.get('contact_estimator') == 'prtouch')
+                or (self.last_contact is not None
+                    and self.last_contact.get('contact_estimator') == 'prtouch')
+                or self.busy or self.candidate is None or self.result is None
+                or not self.result.get('valid', False)
+                or self.result.get('z_offset') is None
+                or not self._finite(self.result.get('z_offset'))
+                or not self.min_offset <= self.result['z_offset']
+                    <= self.max_offset
                 or (self.last_contact is not None
                     and self.last_contact.get('diagnostic_only', False))):
-            raise gcmd.error("No validated Z-offset candidate to accept")
+            raise gcmd.error("No validated Z-offset candidate "
+                             "to apply or accept")
         if self.candidate != self._fingerprint():
             self._invalidate()
             raise gcmd.error("Z-offset candidate is stale; calibrate again")
-        cfg = self._check_pending()
+        return self._check_pending()
+
+    def _set_gcode_z(self, value):
+        # Invoke the native command with MOVE=0: change only G-code mapping.
+        move = self.printer.lookup_object('gcode_move')
+        cmd = self.gcode.create_gcode_command('SET_GCODE_OFFSET',
+            'SET_GCODE_OFFSET', {'Z': value, 'MOVE': 0})
+        move.cmd_SET_GCODE_OFFSET(cmd)
+
+    def cmd_APPLY(self, gcmd):
+        if gcmd.get_command_parameters():
+            raise gcmd.error("AUTO_Z_OFFSET_APPLY takes no parameters")
+        if self.provisional is not None:
+            raise gcmd.error("A provisional offset is already applied")
+        self._validated_candidate(gcmd)
+        move = self.printer.lookup_object('gcode_move')
+        previous = move.get_status(self.reactor.monotonic())['homing_origin'][2]
+        # Native homing still uses the configured probe offset. Replace any
+        # existing babystepping with the correction to the measured offset.
+        configured = self.primary.get_offsets()[2]
+        measured = self.result['z_offset']
+        correction = configured - measured
+        if not all(self._finite(v) for v in (previous, correction)):
+            raise gcmd.error("Invalid provisional G-code Z offset")
+        self.toolhead.wait_moves()
+        self._set_gcode_z(correction)
+        self.provisional = {'z_offset': measured,
+            'configured_z_offset': configured,
+            'previous_gcode_z_offset': previous,
+            'gcode_z_offset': correction}
+        self.candidate = None
+        self.state = 'provisional'
+        gcmd.respond_info("Provisional probe offset %.6f mm: G-code Z "
+            "correction %.6f mm; no movement or save. "
+            "AUTO_Z_OFFSET_ROLLBACK restores the previous correction."
+            % (measured, correction))
+
+    def cmd_ROLLBACK(self, gcmd):
+        self._check_idle()
+        if gcmd.get_command_parameters():
+            raise gcmd.error("AUTO_Z_OFFSET_ROLLBACK takes no parameters")
+        if self.busy or self.provisional is None:
+            raise gcmd.error("No provisional Z-offset trial to roll back")
+        self.toolhead.wait_moves()
+        self._set_gcode_z(self.provisional['previous_gcode_z_offset'])
+        self.provisional = None
+        self._invalidate()
+        self.state = 'idle'
+        gcmd.respond_info("Previous G-code Z correction restored; "
+                          "no movement or save. Configured probe unchanged.")
+
+    def cmd_ACCEPT(self, gcmd):
+        cfg = self._validated_candidate(gcmd)
         cfg.set('bltouch', 'z_offset', '%.6f' % self.result['z_offset'])
         self.candidate = None
         self.state = 'accepted'
@@ -945,9 +1173,11 @@ class AutoZOffset:
 
     def get_status(self, eventtime):
         return {'state': self.state, 'contact_verified': self.contact_verified,
+                'configured_contact_estimator': self.contact_estimator,
                 'verified_points': [i + 1
                                     for i in sorted(self.verified_points)],
                 'candidate': self.candidate is not None,
+                'provisional': self.provisional,
                 'result': self.result, 'error': self.error,
                 'last_contact': self.last_contact, 'stage': self.stage}
 

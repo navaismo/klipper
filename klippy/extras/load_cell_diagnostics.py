@@ -96,10 +96,10 @@ def snapshot(printer, toolhead):
     return result
 
 
-def _references(frames):
+def _references(frames, frame_names=FRAME_NAMES):
     errors, changes, cutoffs = [], [], []
     initial, final, deltas = {}, {}, {}
-    for frame_name in FRAME_NAMES:
+    for frame_name in frame_names:
         frame = frames.get(frame_name)
         if not isinstance(frame, dict):
             errors.append(frame_name + ': missing snapshot')
@@ -383,7 +383,10 @@ def build_report(samples, motion, lookup_z, fit, regression_z=None, error=None):
     # All estimates here are diagnostic only, including the descent hinge fit.
     frames = motion.get('frames', {})
     quality, cutoff = _references(frames)
-    trigger = number(motion.get('trigger_time'))
+    mcu_trigger = number(motion.get('trigger_time'))
+    trigger = mcu_trigger
+    if trigger is None:
+        trigger = number(motion.get('contact_stop', {}).get('stop_time'))
     start, end = (number(motion.get(key))
                   for key in ('ascent_start_time', 'ascent_end_time'))
     period = number(motion.get('sample_period'))
@@ -413,7 +416,8 @@ def build_report(samples, motion, lookup_z, fit, regression_z=None, error=None):
             if valid_bounds:
                 phase = ('post_ascent' if time > end else
                          'ascent' if time >= start else
-                         'trigger_region' if time >= trigger - period else
+                         ('trigger_region' if mcu_trigger is not None else
+                          'stop_region') if time >= trigger - period else
                          'descent')
         if time is None or force is None or z is None:
             invalid += 1
@@ -445,6 +449,9 @@ def build_report(samples, motion, lookup_z, fit, regression_z=None, error=None):
             sensitivity = _window_sensitivity(descent_rows, ascent_rows, fit,
                 trigger, start, analysis_end, descent, ascent,
                 ascent['z'] - descent['z'] if comparable else None)
+            if mcu_trigger is None:
+                for entry in sensitivity['descent']['windows']:
+                    entry['time_reference'] = 'descent_end_time'
         except Exception as exc:
             sensitivity = _unavailable_windows('diagnostic_error')
             sensitivity['error'] = str(exc)[:160]
@@ -492,14 +499,22 @@ def build_report(samples, motion, lookup_z, fit, regression_z=None, error=None):
         'samples': [rows[i] for i in indices],
         'quality': quality,
         'observed_max_force_g': max(f for i, f in forces) if forces else None,
-        'trigger_time': trigger, 'force_trigger_z': number(motion.get('raw_z')),
-        'trigger_reconstructed_z': trigger_z,
+        'trigger_time': mcu_trigger, 'descent_end_time': trigger,
+        'contact_stop_time': trigger if mcu_trigger is None else None,
+        'contact_stop_z': number(motion.get('raw_z'))
+            if mcu_trigger is None else None,
+        'force_trigger_z': number(motion.get('raw_z'))
+            if mcu_trigger is not None else None,
+        'trigger_reconstructed_z': trigger_z
+            if mcu_trigger is not None else None,
         'trigger_nearest_sample_dt': rows[nearest][0] - trigger
-            if timed and trigger is not None else None,
-        'trigger_nearest_sample_force_g': rows[nearest][1] if timed else None,
+            if timed and mcu_trigger is not None else None,
+        'trigger_nearest_sample_force_g': rows[nearest][1]
+            if timed and mcu_trigger is not None else None,
         'regression_contact_z': number(regression_z),
         'descent_fit_z': descent['z'], 'descent_threshold_z': threshold['z'],
-        'mcu_trigger_z': number(motion.get('raw_z')),
+        'mcu_trigger_z': number(motion.get('raw_z'))
+            if mcu_trigger is not None else None,
         'ascent_fit_z': ascent['z'],
         'fit_interpretation': 'model_estimate_not_exact_physical_contact',
         'descent': descent, 'descent_threshold': threshold, 'ascent': ascent,

@@ -5727,6 +5727,18 @@ before measurement, and the calibration reserves the LCD against menus.
 [auto_z_offset]
 load_cell:
 #   Name from [load_cell name]. Reuses that sensor and its calibration.
+#contact_estimator: current
+#   Select current (existing descent-onset estimator) or prtouch (independent
+#   giorgiomaccari PRTouch replay). All three estimates, including legacy
+#   LCBestFit withdrawal, are reported when their acquired data permit it.
+#   Selection changes the numerical result, never acquisition, MCU stopping,
+#   travel bounds or the current onset-based approach reference.
+#   PRTouch results are comparison-only until physically validated: neither
+#   AUTO_Z_OFFSET_APPLY nor AUTO_Z_OFFSET_ACCEPT can use them. No fallback
+#   to another estimator occurs when the selected method is unsupported.
+#   Original PRTouch defaults require 80-SPS configuration, complete ADC
+#   samples and its filtered-count signal rules. Unsupported acquisitions
+#   return not_evaluable, without resampling or extrapolating a contact.
 #probe_point:
 #   Legacy single physical bed XY point, measured with five pairs.
 #probe_points:
@@ -5740,9 +5752,14 @@ load_cell:
 speed:
 lift_speed:
 #   Explicit nozzle approach and contact-release speeds in mm/s. Required.
+#   The speed option affects HX711 descent only, not CR Touch. DEV uses
+#   speed: 2.0 and retains its separate lift_speed. Every HX711 advance,
+#   including the initial approach, has a fixed 0.01875 mm spatial envelope
+#   independent of speed, with one Z step reserved for quantization.
 #   Qualify both at the actual sensor sample rate. Auto Z-offset analyzes up
-#   to 5 seconds of the acquired ascent and still requires at least three
-#   samples on each side of contact. The regular load-cell probe retains
+#   to 5 seconds of acquired ascent for diagnosis; a supported withdrawal
+#   fit needs at least three samples on each side of contact, but does not
+#   veto a supported normal descent onset. The regular load-cell probe keeps
 #   its 0.3-second default window.
 trigger_force:
 force_safety_limit:
@@ -5750,6 +5767,14 @@ force_safety_limit:
 #   trigger_force 10..250, force_safety_limit 100..10000 and greater than
 #   trigger_force. These are allowed configuration ranges, not safe hardware
 #   recommendations. Never guess counts_per_gram in the load_cell section.
+#   trigger_force is now an independent MCU protection, not required normal
+#   completion. Normal acquisition stops on supported onset between finite
+#   MCU-scheduled advances. The analog guard stays armed during host waits;
+#   no additional descent is queued until fresh samples have been evaluated.
+#   Position is held after each advance for the existing three-period sample
+#   budget (37.5 ms at 80 Hz). The MCU guard remains armed while fresh data
+#   arrive and the host computes. The original total travel floor remains
+#   unchanged, with no deeper retry on missing onset.
 #   Auto Z-offset captures an unloaded point reference at clearance with
 #   the existing ADC averaging API, once per point. The raw safety band
 #   is centered on this fixed reference for all pairs at that point.
@@ -5787,11 +5812,12 @@ force_safety_limit:
 #   Maximum wait in seconds; must exceed temperature_stable_time.
 #offset_tolerance: 0.025
 #   Maximum spread in mm among paired offsets at each individual point.
-#   Also bounds disagreement between descending and ascending contact-model
-#   estimates within each tap, including the primary ascent result. This
-#   experimental consistency criterion is not an absolute accuracy bound.
-#   Missing/invalid diagnostic references or unsupported branches reject
-#   the pair after acquisition, without changing its stopping mechanism.
+#   Also retained in the legacy branch-agreement diagnostic; it no longer
+#   vetoes contact onset because withdrawal is a hysteresis diagnostic.
+#   Each pair requires a supported descent onset using the existing drift,
+#   noise, correlation and window-confidence checks. Missing references or
+#   unresolved onset reject without a fallback to either legacy branch.
+#   This spread criterion is not an absolute physical accuracy bound.
 #spatial_tolerance: 0.025
 #   Maximum range in mm among local medians. Must be positive
 #   and no greater than 0.025. Exceeding it retains the diagnostic report

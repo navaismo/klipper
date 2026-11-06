@@ -224,7 +224,8 @@ def estimate(report):
             or len(original) != report.get('sample_count')):
         reasons.append('incomplete_acquisition')
         return result
-    trigger = diagnostics.number(report.get('trigger_time'))
+    trigger = diagnostics.number(report.get('descent_end_time',
+                                             report.get('trigger_time')))
     if trigger is None:
         reasons.append('missing_trigger_time')
         return result
@@ -240,15 +241,33 @@ def estimate(report):
                    for a, b in zip(rows, rows[1:]))):
         reasons.append('invalid_descent_samples')
         return result
+    basis = report.get('descent_window_basis', 'time')
+    speed = diagnostics.number(report.get('descent_window_speed'))
+    if basis not in ('time', 'travel') or (basis == 'travel'
+                                          and (speed is None or speed <= 0.)):
+        reasons.append('invalid_descent_window_reference')
+        return result
+    if basis == 'travel':
+        result.update(window_basis=basis, window_speed_mm_s=speed)
     for duration in diagnostics.DESCENT_WINDOWS:
+        # Stationary acquisition/analysis waits must not shrink the spatial
+        # coverage of a window designed for continuous descent at this speed.
+        # Keep real timestamps in the drift model; never compress sample time.
+        span = duration * speed if basis == 'travel' and duration else None
         lower = trigger - duration if duration is not None else None
-        selected = [r for r in rows if lower is None or r[0] >= lower]
-        if lower is not None and rows[0][0] > lower:
+        selected = [r for r in rows if (r[2] <= rows[-1][2] + span
+                    if span is not None else lower is None or r[0] >= lower)]
+        missing = (rows[0][2] < rows[-1][2] + span if span is not None
+                   else lower is not None and rows[0][0] > lower)
+        if missing:
             fitted = {'status': 'unresolved', 'z': None,
                       'reasons': ['insufficient_window_coverage']}
         else:
             fitted = _fit_window(selected)
-        result['windows'].append(dict(fitted, window_s=duration))
+        entry = dict(fitted, window_s=duration)
+        if basis == 'travel':
+            entry.update(window_basis=basis, travel_span_mm=span)
+        result['windows'].append(entry)
     valid = [w for w in result['windows'] if w['status'] == 'identified']
     result['supported_window_count'] = len(valid)
     if len(valid) < 2:
