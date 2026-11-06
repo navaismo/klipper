@@ -72,6 +72,8 @@ communication with the Klipper developers.
   host-designed menus, print-card lifecycle and validation history.
 - [Automatic Z-offset project](AUTO_Z_OFFSET_PLAN.md): Standalone load-cell
   calibration of CR Touch offset, staged setup and measurement validation.
+- [Native Auto Z-offset](Auto_Z_Offset_Native.md): Separate native
+  pressure-reference backend, Marlin mapping and configuration selection.
 - [Kinematics](Kinematics.md): Technical details on how Klipper
   implements motion.
 - [Protocol](Protocol.md): Information on the low-level messaging

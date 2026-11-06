@@ -480,9 +480,7 @@ class AutoZOffset:
         self._frame_event('before_tap', cr=cr)
         try:
             pos, valid = self.tap.tapping_move.run_tap(
-                tap_gcmd, minimum_z=floor, maximum_descent=distance,
-                onset_stop={'checkpoint': lambda: self._check_thermal(targets),
-                            'search_start_z': cr.test_z - self.min_offset})
+                tap_gcmd, minimum_z=floor, maximum_descent=distance)
         except Exception as exc:
             self._frame_event('tap_failed', cr=cr, error=exc)
             raise
@@ -493,27 +491,11 @@ class AutoZOffset:
             raise gcmd.error("Invalid nozzle contact measurement")
         diagnostic = self.tap.tapping_move.get_contact_diagnostics()
         status = self.tap.tapping_move.get_status(self.reactor.monotonic())
-        stop = diagnostic.get('contact_stop') \
-            if isinstance(diagnostic, dict) else None
-        soft_stop = isinstance(stop, dict) and stop.get('reason') == 'onset'
-        if soft_stop:
-            stop_quality = stop.get('stop_qualification')
-            evidence = stop_quality.get('load_evidence') \
-                if isinstance(stop_quality, dict) else None
-            if (not isinstance(stop_quality, dict)
-                    or stop_quality.get('qualified') is not True
-                    or not isinstance(evidence, dict)
-                    or evidence.get('qualified') is not True):
-                raise gcmd.error(
-                    'Onset stop lacks confirmed load; no candidate')
         trigger_z = status['last_trigger_z']
-        regression_z = status.get('last_regression_z') if soft_stop else pos[2]
-        stop_z = status.get('last_stop_z') if soft_stop else trigger_z
-        if (stop_z is None or not self._finite(stop_z)
-                or (not soft_stop and (trigger_z is None
-                    or not self._finite(trigger_z)))):
-            raise gcmd.error("Missing contact stop position" if soft_stop else
-                             "Missing force trigger position")
+        regression_z = pos[2]
+        stop_z = trigger_z
+        if trigger_z is None or not self._finite(trigger_z):
+            raise gcmd.error("Missing force trigger position")
         # Withdrawal may be unsupported; never label an onset as that fit.
         model_offset = cr.test_z - regression_z \
             if regression_z is not None else None
@@ -522,8 +504,7 @@ class AutoZOffset:
         sensitivity = diagnostic.get('window_sensitivity') \
             if isinstance(diagnostic, dict) else None
         try:
-            onset = load_cell_contact_onset.estimate(
-                stop['decision_report'] if soft_stop else diagnostic)
+            onset = load_cell_contact_onset.estimate(diagnostic)
         except Exception:
             load_cell_diagnostics.warn('contact onset estimation')
             onset = {'status': 'unresolved', 'z': None,
@@ -549,11 +530,10 @@ class AutoZOffset:
             'reasons': reasons,
             'status': 'supported' if qualified else 'rejected'}
         # Both independent contact estimators observe the same descent rows.
-        # Acquisition and later travel references remain owned by the current
-        # onset-stop path; a comparison must never alter motion or its bounds.
+        # Comparison must never alter native acquisition or its travel bounds.
         try:
             prtouch = load_cell_prtouch_estimator.estimate(
-                stop['decision_report'] if soft_stop else diagnostic,
+                diagnostic,
                 sample_period=branches.get('motion', {}).get('sample_period'))
         except Exception:
             load_cell_diagnostics.warn('PRTouch comparison')
@@ -566,6 +546,10 @@ class AutoZOffset:
         prtouch['observational_offset'] = prtouch_offset
         comparison = {
             'lcbestfit': {'z': regression_z, 'offset': model_offset,
+                'status': 'identified' if regression_z is not None
+                    else 'not_evaluable',
+                'reasons': [] if regression_z is not None
+                    else ['withdrawal_fit_unavailable'],
                 'descent_z': branches.get('descent_fit_z'),
                 'withdrawal_z': branches.get('ascent_fit_z'),
                 'diagnostic_only': True, 'eligible_for_application': False},
@@ -608,7 +592,7 @@ class AutoZOffset:
             'regression_delta': regression_z - trigger_z
                 if regression_z is not None and trigger_z is not None else None,
             'contact_stop_z': stop_z,
-            'stop_reason': 'onset' if soft_stop else 'force',
+            'stop_reason': 'force',
             'offset': selected_offset
                 if selected_qualified and not diagnostic_only else None,
             'model_offset': model_offset,
@@ -647,12 +631,18 @@ class AutoZOffset:
                self.last_contact['stop_reason']))
         logging.info("Auto Z-offset contact: %s", self.last_contact)
         gcmd.respond_info(
-            'Contact estimators: LCBestFit z=%s offset=%s; current z=%s '
-            'offset=%s; PRTouch status=%s z=%s offset=%s; selected=%s; '
-            'PRTouch comparison only, no apply or save; reasons=%s'
-            % (regression_z, model_offset, onset_z, offset,
+            'Contact estimators (same acquisition):\n'
+            'LCBestFit status=%s z=%s mm offset=%s mm; reasons=%s\n'
+            'Current onset status=%s z=%s mm offset=%s mm; reasons=%s\n'
+            'PRTouch status=%s z=%s mm offset=%s mm; reasons=%s\n'
+            'selected=%s; PRTouch comparison only, no apply or save'
+            % (comparison['lcbestfit']['status'], regression_z, model_offset,
+               ', '.join(comparison['lcbestfit']['reasons']) or 'none',
+               onset['status'], onset_z, offset,
+               ', '.join(onset['reasons']) or 'none',
                prtouch['status'], prtouch_z, prtouch_offset,
-               self.contact_estimator, ', '.join(prtouch['reasons']) or 'none'))
+               ', '.join(prtouch['reasons']) or 'none',
+               self.contact_estimator))
         if sensitivity is not None:
             try:
                 spans = [load_cell_diagnostics.number(

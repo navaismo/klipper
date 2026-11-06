@@ -32,6 +32,26 @@ followed by the existing SAVE_CONFIG workflow. Physical qualification and a
 supervised first-layer trial precede accepting a new candidate. The historical
 four-point qualification below explains the move to reference/validation.
 
+## Native contact acquisition restored (2026-11-06)
+
+The segmented onset-stop experiment below is historical and superseded.
+DEV now uses the direct native contact path recovered from
+`7f7f921964839a4dd5fcacb5e9554a0d0700bfc8`. Reversing the seven recorded
+post-target `load_cell_probe.py` patches recovered an exact byte match with
+that historical Git file, establishing the source used before the November 3
+segmentation change and consistent with the 11:37 P1/P2 records.
+
+Each tap makes one native HomingMove/drip descent at the historical 0.5 mm/s
+HX711 speed. The unchanged 75 g MCU threshold provides normal stopping;
+the 200 g raw limit, MCU sensor/communication checks and existing per-point
+endpoint remain active. A missed trigger rejects at the endpoint, without a
+deeper retry. CR Touch, the original withdrawal, LCBestFit, current onset,
+PRTouch comparison/selection and explicit APPLY/ROLLBACK are preserved.
+There is no host-side segment executor, streaming snapshot poll, repeated
+load-confirmation wait or onset-controlled stop. The native MCU sample
+watchdog is retained. Offset accuracy and a fresh-install-safe search range
+are not established merely by restoring this motion path.
+
 ## Systematic offset investigation (2026-10-30)
 
 ### Independent PRTouch comparison (2026-11-03)
@@ -81,7 +101,7 @@ the algorithm-fidelity tests live in
 `test/fixtures/prtouch_giorgiomaccari_reference.json`. No original PRTouch
 motor driver, firmware, offset application or configuration writer is ported.
 
-### Onset-controlled acquisition (2026-11-03)
+### Historical onset-controlled acquisition (2026-11-03)
 
 The 75 g MCU trigger previously served both normal completion and protection.
 The four November 3 endpoint records show why that fails operationally:
@@ -104,15 +124,20 @@ keeps travel below the envelope. Invalid step geometry rejects before motion.
 The unchanged overall floor clamps every advance. DEV's HX711 `speed` is
 2.0 mm/s; CR Touch speed, release speed and other moves are unchanged.
 
-After each segment, acquisition waits with position held for the existing
-three-sample-period budget (37.5 ms at 80 Hz). This permits original samples
-after an advance shorter than one conversion period; it does not fabricate
-timestamps, interpolate ADC samples or change filter rates. The decision
-cutoff includes stationary samples; `motion_end_time` separately records the
-last segment's native endpoint time. Fitting still begins only at the
-provisional search reference. No later descent is queued while the host
-waits, fits or fails. Host delay can extend stationary compression
-and acquisition duration, but cannot extend the queued downward segment.
+Each advance returns its scheduled native endpoint time directly. Calling
+`get_last_move_time()` here would re-prime an idle queue and wait for a later
+time instead of the actual endpoint. Acquisition checks the endpoint's
+original samples before scheduling another advance. There is no unconditional
+three-period dwell after every advance. Only an identified onset lacking
+fresh independent load confirmation holds position for the existing
+three-period budget (37.5 ms at 80 Hz), then repeats the unchanged estimator
+and confirmation checks. An empty acquisition can wait one nominal conversion
+to obtain its first sample. Sample timestamps and filter rates are unchanged.
+Previously reconstructed sample Z values are reused only within the checked
+coordinate frame and retained rolling window. Fitting still begins only at
+the provisional search reference. No later descent is queued while the host
+waits, fits or fails. Host delay can extend stationary compression and
+acquisition duration, but cannot extend the queued downward segment.
 The current MCU force stop, raw band, sample/error and communication checks
 remain independent. Frozen arriving data cannot manufacture onset and can
 only consume the unchanged finite envelope. A hard-force stop, missing data,
@@ -123,8 +148,12 @@ can take five nominal periods (62.5 ms at 80 Hz), not three. That timeout or
 host latency cannot enlarge an already finite segment. The 75 g threshold
 remains an MCU measurement threshold, not a guaranteed peak physical force.
 This change has offline scheduling/abort coverage, not physical validation
-at 2.0 mm/s. Tiny moves with intervening sample/analysis waits do not recreate
-a continuous PRTouch descent or promise a fourfold reduction in cycle time.
+at 2.0 mm/s. Native transport lead, sample delivery and analysis still separate
+the finite advances. A 2.0 mm/s segment feedrate is not a continuous 2.0 mm/s
+descent or a promise of fourfold cycle-time reduction. At 80 Hz, continuous
+2.0 mm/s would travel 0.025 mm per nominal conversion, exceeding the existing
+0.01875 mm unobserved-travel envelope even before bulk-delivery latency.
+The host therefore must not stream advances while awaiting their samples.
 
 A reliable live onset ends normal acquisition. Its value selects the paired
 offset using the existing formula. The unchanged withdrawal estimator is

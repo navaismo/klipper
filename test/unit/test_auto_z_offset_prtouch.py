@@ -124,7 +124,7 @@ class EstimatorSelectionTests(unittest.TestCase):
         self.assertEqual(self.module.state, 'diagnostic_complete')
         self.assert_not_applicable()
 
-    def test_soft_stop_uses_causal_rows_and_original_sensor_period(self):
+    def test_native_stop_uses_acquired_rows_and_original_sensor_period(self):
         decision = copy.deepcopy(self.diagnostic)
         del decision['motion']['sample_period']
         self.diagnostic['contact_stop'] = {
@@ -137,8 +137,55 @@ class EstimatorSelectionTests(unittest.TestCase):
         with mock.patch.object(auto.load_cell_prtouch_estimator, 'estimate',
                                return_value=self.prtouch_result()) as estimate:
             self.command()
-        self.assertIs(estimate.call_args.args[0], decision)
+        self.assertIs(estimate.call_args.args[0], self.diagnostic)
         self.assertEqual(estimate.call_args.kwargs['sample_period'], .0125)
+        self.assert_not_applicable()
+
+    def test_both_estimators_receive_one_unsegmented_native_acquisition(self):
+        with mock.patch.object(auto.load_cell_contact_onset, 'estimate',
+                wraps=auto.load_cell_contact_onset.estimate) as current:
+            with mock.patch.object(auto.load_cell_prtouch_estimator,
+                    'estimate', wraps=auto.load_cell_prtouch_estimator.estimate
+                    ) as prtouch:
+                self.command()
+        self.tap.tapping_move.run_tap.assert_called_once()
+        self.assertNotIn('onset_stop',
+                         self.tap.tapping_move.run_tap.call_args.kwargs)
+        current.assert_called_once()
+        prtouch.assert_called_once()
+        self.assertIs(current.call_args.args[0], self.diagnostic)
+        self.assertIs(prtouch.call_args.args[0], self.diagnostic)
+        self.assertEqual(prtouch.call_args.kwargs['sample_period'], .0125)
+        comparison = self.module.last_contact['estimator_comparison']
+        self.assertEqual(comparison['lcbestfit']['status'], 'identified')
+        self.assertEqual(comparison['lcbestfit']['reasons'], [])
+        self.assertEqual(comparison['prtouch']['parameters'][
+            'acquisition_hz'], 80.)
+        self.assertEqual(comparison['prtouch']['parameters'][
+            'min_hold_counts'], 3000)
+        self.assertFalse(comparison['prtouch']['eligible_for_application'])
+        self.assert_not_applicable()
+
+    def test_console_reports_each_independent_status_and_exact_rejection(self):
+        self.module.contact_estimator = 'prtouch'
+        unresolved = {'status': 'unresolved', 'z': None,
+                      'reasons': ['window_models_disagree']}
+        rejected = dict(self.prtouch_result(), status='not_evaluable',
+            z=None, reasons=[
+                'original_signal_rules_not_met_before_acquisition_end'])
+        with mock.patch.object(auto.load_cell_contact_onset, 'estimate',
+                               return_value=unresolved):
+            with mock.patch.object(auto.load_cell_prtouch_estimator,
+                                   'estimate', return_value=rejected):
+                self.command()
+        messages = '\n'.join(c.args[0] for c in
+                             self.gcmd.respond_info.call_args_list)
+        for expected in ('LCBestFit status=identified',
+                'Current onset status=unresolved', 'window_models_disagree',
+                'PRTouch status=not_evaluable',
+                'original_signal_rules_not_met_before_acquisition_end'):
+            self.assertIn(expected, messages)
+        self.assertEqual(self.module.state, 'diagnostic_rejected')
         self.assert_not_applicable()
 
 
@@ -164,8 +211,7 @@ class FullWorkflowSelectionTests(unittest.TestCase):
     def test_full_prtouch_comparison_has_eight_pairs_and_no_application(self):
         self.h.automatic(BED_TEMP=60., NOZZLE_TEMP=170.)
         original_calls = self.h.tap.tapping_move.run_tap.call_args_list
-        original_bounds = [(c.kwargs['minimum_z'], c.kwargs['maximum_descent'],
-                            c.kwargs['onset_stop']['search_start_z'])
+        original_bounds = [(c.kwargs['minimum_z'], c.kwargs['maximum_descent'])
                            for c in original_calls]
         self.setUp()
         self.h.module.contact_estimator = 'prtouch'
@@ -179,8 +225,7 @@ class FullWorkflowSelectionTests(unittest.TestCase):
         self.assertIsNone(module.candidate)
         self.assertEqual(self.h.tap.tapping_move.run_tap.call_count, 8)
         compared_bounds = [(c.kwargs['minimum_z'],
-                            c.kwargs['maximum_descent'],
-                            c.kwargs['onset_stop']['search_start_z'])
+                            c.kwargs['maximum_descent'])
             for c in self.h.tap.tapping_move.run_tap.call_args_list]
         self.assertEqual(compared_bounds, original_bounds)
         self.assertAlmostEqual(module.result['z_offset'],

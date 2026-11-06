@@ -504,51 +504,16 @@ The following information is available for `[auto_z_offset]`:
   Contains one-based `point_index` and `sample_index`, `point` (physical bed
   XY), `cr_trigger_z`, `force_trigger_z`,
   `regression_z`, `regression_delta` (regression minus force-trigger Z),
-  `contact_stop_z` (actual halt Z) and `stop_reason` (`onset` for a normal
-  onset-controlled acquisition, `force` for historical force-triggered taps).
-  A normal onset stop has null `force_trigger_z` and `regression_delta`:
-  it must not fabricate a force-trigger position. `regression_z` and
-  `model_offset` are null when the diagnostic withdrawal fit is unavailable.
-  The tap JSON separates actual MCU `trigger_time` from `descent_end_time`,
-  the final finite segment's analysis boundary in MCU print-time coordinates.
-  For an onset stop, `contact_stop_time` is that analysis boundary, not an
-  exact physical stop-edge timestamp. `contact_stop_z` is the halt position
-  reconstructed by native homing from step counters. `stop_region` and
-  sensitivity `time_reference: descent_end_time` distinguish it from a
-  genuine MCU trigger region.
-  The tap report's `contact_stop` records `reason`, `stop_z`, `stop_time`,
-  `onset`, the causal `decision_report`, `max_search_segment_mm`,
-  `segment_count`, and `search_start_z`.
-  `stop_qualification` separately records `qualified`, `reasons`,
-  `selected_interval_width_mm`, `maximum_interval_width_mm` and
-  `physical_contact_verified` (False). Normal acquisition requires the
-  selected window's existing profile/sampling interval to fit within one
-  search advance; otherwise mathematical identification cannot stop it.
-  The maximum width is the existing `max_search_segment_mm`, not a new
-  setting or physical-accuracy guarantee. Failed approaches retain this
-  verdict inside `motion.onset_decision.stop_qualification`.
-  `load_evidence` verdict contains `qualified`, `reason`,
-  `confirmation_samples`, `noise_multiplier`, `minimum_rise_g` and, when
-  computable, `free_sample_count`, `noise_rms_g`, `required_rise_g`,
-  `minimum_recent_force_g`, `minimum_recent_excess_g`, `sample_times` and
-  `sample_z`. It uses actual newest samples, not the fitted compression
-  amplitude. Missing/stale evidence, changed tare, an unobserved transition
-  or insufficient sustained compression cannot qualify a normal stop.
-  The causal report includes `operational_tare_counts`,
-  `previous_descent_end_time` and `maximum_sample_age_s` (the existing MCU
-  sample-monitor budget). These are acquisition references, not new settings.
-  The decision report uses only
-  samples at or before its analysis boundary, with original timestamps,
-  raw counts, tare and step-history Z. A rolling contiguous window retains
-  at most 2048 samples without resampling; final withdrawal reporting is
-  likewise bounded. `motion.raw_sample_retention` records that limit.
-  A failed approach retains `motion.onset_decision`: the last actual live
-  `report` and `result`, `segment_count`, `max_search_segment_mm` and
-  `host_error`. The report preserves the exact contiguous causal input to
-  that decision; the surrounding failure log may separately be decimated.
-  Native `trigger_time` and `raw_z` are recorded before rejecting a hard-force
-  stop when native homing returned them. A native safety error before that
-  return leaves unavailable trigger fields unset; no trigger is invented.
+  `contact_stop_z` and `stop_reason` (`force` for the restored native
+  acquisition). `force_trigger_z` is the original MCU-trigger coordinate;
+  `regression_z` is the unchanged withdrawal fit. The tap report retains the
+  original sample timestamps, raw ADC counts, tare and step-history Z.
+  A missing trigger, sensor error or failed withdrawal fit rejects the tap;
+  the estimator cannot turn exhausted travel into a successful contact.
+  Earlier segmented recordings may contain `contact_stop`,
+  `motion.onset_decision`, load-confirmation and rolling-retention metadata.
+  These remain readable historical evidence; new native taps do not emit
+  segmented-decision reports or use them to stop motion.
   Onset support describes the fitted signal, not verified absolute physical
   contact accuracy. The same pair also contains
   `offset` (onset-derived paired separation, null for a rejected onset or
@@ -577,6 +542,12 @@ The following information is available for `[auto_z_offset]`:
   `current` and `prtouch`; the PRTouch entry includes `status` (`identified`
   or `not_evaluable`), original sample `time`/`z`, `observational_offset`,
   filtered ADC counts, source parameters and explicit replay limitations.
+  The LCBestFit entry also reports `status` and `reasons`; an available fit
+  is `identified`, which does not validate its absolute physical accuracy.
+  Console comparisons show each method's status, Z, offset and independent
+  rejection reasons. Both contact estimators receive the same completed
+  native acquisition, with its original ADC timestamps and reconstructed Z;
+  changing the selector does not select a different movement or filter rate.
   `estimator_qualification` describes the selected numerical estimate; its
   `eligible_for_candidate` does not authorize application. PRTouch always
   has `eligible_for_application: False`; a complete consistent PRTouch run
@@ -1014,3 +985,20 @@ component one could use
 one wanted to find the component associated with the "extruder"
 object, one could use
 `{printer.toolhead.position[printer.toolhead.extra_axes.extruder]}`.
+
+## auto_z_offset_native
+
+The `[auto_z_offset_native]` object exposes `backend` (`native`), `busy`,
+`error`, `result` (null until a completed session) and
+`eligible_for_application` (always false). `result` contains `points` (ordered
+per-point reports), `reference_point` (1), `spatial_range` (maximum minus minimum
+point offset, diagnostic only), and the first point's fields retained at the top
+level for compatibility: `point`,
+`cr_test_z`, `cr_bed_z`, `raw_bed_reference_z`, `minimum_z`, `pressure_z`,
+`pressure_samples` (Z, original MCU print-time and sample count),
+`pressure_range`, `provisional_z_offset`, `reference_kind`,
+`point_index` (1-based), `safety_reference_counts` (local unloaded ADC anchor),
+`applied_adjustment_mm` (zero), `eligible_for_application` (false) and
+`saved` (false). New/failed sessions, homing, sensor calibration and disconnect
+invalidate the previous report. See
+[Auto_Z_Offset_Native.md](Auto_Z_Offset_Native.md).

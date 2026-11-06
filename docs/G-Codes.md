@@ -1083,53 +1083,20 @@ and heat the bed/nozzle; perform the staged qualification in
 The normal workflow and AUTO_Z_OFFSET_CALIBRATE are available. The optional
 observational mode never creates an applicable candidate:
 
-Nozzle acquisition uses finite MCU-scheduled moves, with the native analog
-endstop armed continuously throughout the search and host analysis. The free
-approach ends at `cr.test_z - minimum_offset`, using the existing allowed
-probe separation as a search reference, not a measured offset. Further
-advances are at most `probe_speed * MONITOR_MAX / sensor_sample_rate`:
-0.01875 mm at 0.5 mm/s, 80 SPS and the existing three-sample MCU monitor
-budget, subject to native step quantization. Each finite advance finishes
-before fresh timestamped samples are evaluated with the existing onset
-confidence checks. No next descent is queued while the host waits or fits.
-This bounds queued travel independently of host detection latency; it does
-not assert a physical force limit from a distance alone. Acquisition may
-take longer than a continuous force-triggered move.
-Live onset windows cover the existing nominal durations times probe speed
-in Z travel, so stationary waits cannot shrink their spatial coverage.
-All fits retain real timestamps; baseline drift and confidence criteria
-are unchanged. Inadequate recorded coverage still rejects a window.
-Mathematical window agreement alone cannot stop acquisition: the selected
-fit's existing profile/sampling interval must also fit within one bounded
-search advance. This conservative precision policy has no new setting and
-does not prove physical accuracy. An identified but insufficiently localized
-model keeps searching inside the original floor, or fails there; it cannot
-become a provisional candidate.
-It must also observe three fresh consecutive compression samples beyond
-the selected profile interval. Each must exceed the existing diagnostic
-noise-rise criterion, max(5 times observed free residual RMS, 1 g), both
-relative to the operational tare and above the drifting free baseline.
-Mathematical stability, an old spike or extrapolation alone cannot stop the
-nozzle. Missing load evidence continues only within the existing bound or
-rejects there. Tare/epoch changes and stale samples reject; no deeper retry
-or hardware force-threshold change is involved. Rejected/incomplete
-acquisition cannot produce an applicable candidate.
-
-A supported onset ends normal acquisition without requiring the configured
-hard-force trigger. The MCU force trigger, raw safety limits and sensor/
-communication monitoring remain independent protections; a hard-force stop
-before a supported onset is an error, not a substitute contact candidate.
-Missing/stale data, invalid references or reaching the unchanged travel floor
-without reliable onset reject the acquisition. There is no deeper retry or
-global-minimum fallback. The initial P1 search still depends on the native
-homing coordinate seed; arbitrary fresh-install offsets may place contact
-outside its existing envelope. In that case the command must fail.
-
-Withdrawal remains diagnostic: its fit may be unavailable without vetoing
-a supported onset. Sensor errors and incomplete/changed coordinate
-references remain fatal. No new setting or MCU firmware update is required.
-The paired result remains `cr.test_z - descent_contact_onset_z`; APPLY,
-ROLLBACK, local/spatial validation and explicit saving are unchanged.
+Nozzle acquisition uses the restored native Klipper homing/probing path:
+one continuous descent at the configured HX711 speed, stopped by the MCU
+force trigger. The existing per-point endpoint and maximum travel are
+validated before tare and arming. Missing trigger at that endpoint rejects
+without deeper travel or automatic retry. MCU raw-range, sensor and
+communication protections remain active independently of host analysis.
+There are no host-side onset decisions, segment loops or repeated sample
+confirmation waits during descent. The collector retains the acquisition
+through the original withdrawal for the existing estimators and reports.
+The paired calculation, estimator selection, local/spatial checks and
+explicit APPLY/ROLLBACK remain unchanged. Unreliable or incomplete
+measurements cannot create an applicable candidate. The initial P1 search
+still depends on the native homing reference; this rollback does not invent
+a fresh-install search envelope or a physical-force guarantee.
 
 `AUTO_Z_OFFSET DIAGNOSTIC=1 [POINT=1] [COLD=1]
 [BED_TEMP=<degrees>] [NOZZLE_TEMP=<degrees>]`
@@ -2240,3 +2207,15 @@ independent adjustments to each Z stepper to compensate for tilt. See
 the PROBE command for details on the optional probe parameters. The
 optional `RETRIES`, `RETRY_TOLERANCE`, and `HORIZONTAL_MOVE_Z` values
 override those options specified in the config file.
+
+### AUTO_Z_OFFSET with the native backend
+
+With `[auto_z_offset_native]`,
+`AUTO_Z_OFFSET [BED_TEMP=60] [NOZZLE_TEMP=170]` performs native CR Touch probing
+and three bounded MCU force-triggered nozzle descents at each configured
+physical point (`probe_points`, or legacy single `probe_point`). It clears bed
+mesh and reports `cr.test_z - median(pressure_z)` per point plus the spatial
+range, without applying, staging or averaging. Any failure stops the cycle.
+The top-level provisional reference remains point 1. A loaded force reference is not proof of first physical contact.
+No APPLY, ACCEPT or SAVE_CONFIG operation is provided. Other command parameters
+are rejected. See [Auto_Z_Offset_Native.md](Auto_Z_Offset_Native.md).

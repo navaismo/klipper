@@ -14,7 +14,6 @@ from . import cs1237
 from . import ads131m0x
 from . import probe, manual_probe, trigger_analog, load_cell
 from . import load_cell_diagnostics
-from . import load_cell_contact_move
 
 # MCU SOS filter scaled to "fractional grams" for consistent sensor precision
 FRAC_GRAMS_CONV = 32768.0
@@ -455,8 +454,7 @@ class LoadCellProbingMove:
         self._mcu_trigger_analog.set_trigger("abs_ge", trigger_frac_grams)
 
     # Probe towards z_min until the trigger_analog on the MCU triggers
-    def probing_move(self, gcmd, minimum_z=None, maximum_descent=None,
-                     onset_stop=None):
+    def probing_move(self, gcmd, minimum_z=None, maximum_descent=None):
         # do not permit probing if the load cell is not calibrated
         if not self._load_cell.is_calibrated():
             raise self._printer.command_error("Load Cell not calibrated")
@@ -499,34 +497,12 @@ class LoadCellProbingMove:
                 self._diagnostic_motion = None
                 load_cell_diagnostics.warn('probe start')
         # do homing move
-        stop = None
         try:
-            if onset_stop is None:
-                epos = phoming.probing_move(self._mcu_trigger_analog, pos,
-                                            speed)
-            else:
-                if minimum_z is None or self._diagnostic_motion is None:
-                    raise self._printer.command_error(
-                        'Onset acquisition requires explicit bounds and trace')
-                stop = load_cell_contact_move.OnsetStop(
-                    self, collector, _lookup_z_pos, check_sensor_errors,
-                    onset_stop)
-                epos = phoming.probing_move(self._mcu_trigger_analog, pos,
-                                            speed, move_handler=stop.move)
-                trigger_time = (
-                    self._mcu_trigger_analog.get_last_trigger_time())
-                # Capture native results before finish can reject a force stop.
-                self._diagnostic_motion.update({
-                    'trigger_time': trigger_time if trigger_time > 0. else None,
-                    'raw_z': epos[2]})
-                result = stop.finish(trigger_time)
-                result['stop_z'] = epos[2]
-                self._diagnostic_motion['contact_stop'] = result
+            epos = phoming.probing_move(self._mcu_trigger_analog, pos, speed)
         except Exception as exc:
             try:
                 results = collector.stop_collecting()
                 if self._log_trace:
-                    self._retain_onset_failure(stop)
                     self._log_probe_failure(exc, results)
             except Exception:
                 load_cell_diagnostics.warn('failure data collection')
@@ -535,28 +511,14 @@ class LoadCellProbingMove:
             try:
                 motion = getattr(self, '_diagnostic_motion', None)
                 if isinstance(motion, dict):
-                    trigger_time = (
-                        self._mcu_trigger_analog.get_last_trigger_time())
-                    motion.update({'trigger_time': trigger_time
-                        if trigger_time > 0. else None, 'raw_z': epos[2]})
+                    motion.update({'trigger_time':
+                        self._mcu_trigger_analog.get_last_trigger_time(),
+                        'raw_z': epos[2]})
                     motion['frames']['after_probe'] = (
                         load_cell_diagnostics.snapshot(self._printer, toolhead))
             except Exception:
                 load_cell_diagnostics.warn('probe end')
         return epos, collector
-
-    def _retain_onset_failure(self, stop):
-        # Preserve the exact causal input/verdict; never re-fit or mask safety.
-        try:
-            if stop is not None and self._diagnostic_motion is not None:
-                self._diagnostic_motion['onset_decision'] = {
-                    'report': stop.report, 'result': stop.result,
-                    'segment_count': stop.segment_count,
-                    'max_search_segment_mm': stop.max_segment,
-                    'stop_qualification': stop.qualification,
-                    'host_error': str(stop.error) if stop.error else None}
-        except Exception:
-            load_cell_diagnostics.warn('onset failure evidence')
 
     # Wait for the MCU to trigger with no movement
     def probing_test(self, gcmd, timeout):
@@ -599,46 +561,29 @@ class TappingMove:
             "load_cell_probe", name, header)
         self._best_fit = LCBestFit(self._printer)
 
-    def run_tap(self, gcmd, minimum_z=None, maximum_descent=None,
-                onset_stop=None):
+    def run_tap(self, gcmd, minimum_z=None, maximum_descent=None):
         self._is_last_result_valid = False
         self._last_result = None
         self._last_trigger_z = None
         self._last_diagnostic_report = None
-        self._last_regression_z = None
-        self._last_stop_z = None
-        self._last_stop_reason = None
         try:
-            if onset_stop is not None and (minimum_z is None
-                                           or maximum_descent is None):
-                raise self._printer.command_error(
-                    'Onset acquisition requires explicit contact bounds')
             if minimum_z is None and maximum_descent is None:
                 return self._run_tap(gcmd)
-            if onset_stop is None:
-                return self._run_tap(gcmd, minimum_z, maximum_descent)
-            return self._run_tap(gcmd, minimum_z, maximum_descent, onset_stop)
+            return self._run_tap(gcmd, minimum_z, maximum_descent)
         finally:
             if self._collector is not None:
                 self._collector.stop_collecting()
                 self._collector = None
 
-    def _run_tap(self, gcmd, minimum_z=None, maximum_descent=None,
-                 onset_stop=None):
+    def _run_tap(self, gcmd, minimum_z=None, maximum_descent=None):
         # do the descending move
         if minimum_z is None and maximum_descent is None:
             epos, collector = self._load_cell_probing_move.probing_move(gcmd)
-        elif onset_stop is None:
-            epos, collector = self._load_cell_probing_move.probing_move(
-                gcmd, minimum_z=minimum_z, maximum_descent=maximum_descent)
         else:
             epos, collector = self._load_cell_probing_move.probing_move(
-                gcmd, minimum_z=minimum_z, maximum_descent=maximum_descent,
-                onset_stop=onset_stop)
+                gcmd, minimum_z=minimum_z, maximum_descent=maximum_descent)
         self._collector = collector
-        self._last_stop_z = epos[2]
-        self._last_stop_reason = 'onset' if onset_stop is not None else 'force'
-        self._last_trigger_z = epos[2] if onset_stop is None else None
+        self._last_trigger_z = epos[2]
         # collect samples from the tap
         toolhead = self._printer.lookup_object('toolhead')
         # Homing workaround
@@ -676,32 +621,15 @@ class TappingMove:
         # Collect samples until the end of the ascent
         move_end = toolhead.get_last_move_time()
         results = collector.collect_until(move_end)
-        if onset_stop is not None:
-            results = (results[0][-load_cell_diagnostics.MAX_SAMPLES:],
-                       results[1])
         corrected_z, fit_error = None, None
-        samples = None
         try:
-            checked = check_sensor_errors(results, self._printer)
-            if onset_stop is not None:
-                previous = None
-                for sample in checked:
-                    if (len(sample) != 4 or any(
-                            load_cell_diagnostics.number(v) is None
-                            for v in sample) or (previous is not None
-                            and sample[0] <= previous)):
-                        raise self._printer.command_error(
-                            'Invalid onset acquisition samples')
-                    previous = sample[0]
-            samples = checked
+            samples = check_sensor_errors(results, self._printer)
             # Perform fit on the ascent data
             corrected_z = self._analyze_ascent(gcmd, samples, ascent_start_time,
                                                 toolhead, epos[2])
         except Exception as exc:
             fit_error = exc
-            if onset_stop is None or samples is None:
-                raise
-            load_cell_diagnostics.warn('withdrawal fit after onset stop')
+            raise
         finally:
             if self._log_trace:
                 try:
@@ -714,9 +642,6 @@ class TappingMove:
                             'lift_speed': params['lift_speed'],
                             'retract_distance': lift_dist,
                             'sensor_errors': results[1]})
-                        if onset_stop is not None:
-                            motion['raw_sample_retention'] = (
-                                load_cell_diagnostics.MAX_SAMPLES)
                         motion['frames']['after_ascent'] = (
                             load_cell_diagnostics.snapshot(
                                 self._printer, toolhead))
@@ -724,31 +649,11 @@ class TappingMove:
                             load_cell_diagnostics.log_report(results[0], motion,
                                 toolhead, _lookup_z_pos,
                                 self._best_fit.find_best_fit,
-                                corrected_z, fit_error
-                                if onset_stop is None or samples is None
-                                else None))
-                        if onset_stop is not None and samples is not None:
-                            references, unused = (
-                                load_cell_diagnostics._references(
-                                    motion['frames']))
-                            if (not references['references_complete']
-                                    or references['frame_state']
-                                        != 'consistent'):
-                                raise self._printer.command_error(
-                                    'Contact reference changed after onset')
-                            stop = motion['contact_stop']
-                            self._last_diagnostic_report['contact_stop'] = stop
-                            if fit_error is not None:
-                                stop['withdrawal_fit_error'] = str(fit_error)
+                                corrected_z, fit_error))
                 except Exception:
                     load_cell_diagnostics.warn('ascent report')
-                    if onset_stop is not None and samples is not None:
-                        raise
         # Replace the probe result with the fitted Z position
-        self._last_regression_z = corrected_z
-        epos[2] = (self._load_cell_probing_move._diagnostic_motion[
-            'contact_stop']['onset']['z'] if onset_stop is not None
-            else corrected_z)
+        epos[2] = corrected_z
 
         # Analyze the tap data
         ppa = TapAnalysis(samples)
@@ -767,9 +672,6 @@ class TappingMove:
         return {
             'last_z_result': self._last_result,
             'last_trigger_z': self._last_trigger_z,
-            'last_regression_z': getattr(self, '_last_regression_z', None),
-            'last_stop_z': getattr(self, '_last_stop_z', None),
-            'last_stop_reason': getattr(self, '_last_stop_reason', None),
             'is_last_tap_valid': self._is_last_result_valid
         }
 

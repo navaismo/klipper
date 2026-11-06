@@ -75,7 +75,7 @@ class HomingMove:
         return [cp if cp is not None else tp
                 for cp, tp in zip(cpos, thpos[:3])] + thpos[3:]
     def homing_move(self, movepos, speed, probe_pos=False,
-                    triggered=True, check_triggered=True, move_handler=None):
+                    triggered=True, check_triggered=True):
         # Notify start of homing/probing move
         self.printer.send_event("homing:homing_move_begin", self)
         # Note start location
@@ -100,10 +100,7 @@ class HomingMove:
         # Issue move
         error = None
         try:
-            if move_handler is None:
-                self.toolhead.drip_move(movepos, speed, all_endstop_trigger)
-            else:
-                move_handler(movepos, speed, all_endstop_trigger)
+            self.toolhead.drip_move(movepos, speed, all_endstop_trigger)
         except self.printer.command_error as e:
             error = "Error during homing move: %s" % (str(e),)
         # Wait for endstops to trigger
@@ -324,16 +321,11 @@ class PrinterHoming:
     def check_probe_first_home(self, gcmd):
         return (gcmd.get_command() == 'G28'
                 and gcmd.get("HOME_ATTEMPT_NUM", None) == '1')
-    def probing_move(self, mcu_probe, pos, speed, check_movement=True,
-                     move_handler=None):
+    def probing_move(self, mcu_probe, pos, speed, check_movement=True):
         endstops = [(mcu_probe, "probe")]
         hmove = HomingMove(self.printer, endstops)
         try:
-            if move_handler is None:
-                epos = hmove.homing_move(pos, speed, probe_pos=True)
-            else:
-                epos = hmove.homing_move(pos, speed, probe_pos=True,
-                    check_triggered=False, move_handler=move_handler)
+            epos = hmove.homing_move(pos, speed, probe_pos=True)
         except self.printer.command_error:
             if self.printer.is_shutdown():
                 raise self.printer.command_error(

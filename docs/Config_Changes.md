@@ -1,5 +1,13 @@
 # Configuration Changes
 
+20261106 (fork native contact rollback): Restore the direct MCU-force-triggered
+nozzle acquisition used before segmented onset stopping. Remove the segment
+executor, streaming snapshot polling and per-segment confirmation waits.
+Keep existing per-point travel bounds, native MCU error/force stops, estimator
+selection, offset mathematics and explicit APPLY/ROLLBACK. DEV descent speed
+returns to the recorded 0.5 mm/s; no MCU flash or new setting is required.
+The onset-controlled acquisition entry below is historical and superseded.
+
 20261103 (fork onset-controlled acquisition): Auto Z-offset nozzle searches
 now use finite MCU-scheduled advances and the existing descent-onset
 confidence checks, with the native analog force guard armed continuously.

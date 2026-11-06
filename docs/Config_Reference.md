@@ -5752,14 +5752,11 @@ load_cell:
 speed:
 lift_speed:
 #   Explicit nozzle approach and contact-release speeds in mm/s. Required.
-#   The speed option affects HX711 descent only, not CR Touch. DEV uses
-#   speed: 2.0 and retains its separate lift_speed. Every HX711 advance,
-#   including the initial approach, has a fixed 0.01875 mm spatial envelope
-#   independent of speed, with one Z step reserved for quantization.
-#   Qualify both at the actual sensor sample rate. Auto Z-offset analyzes up
-#   to 5 seconds of acquired ascent for diagnosis; a supported withdrawal
-#   fit needs at least three samples on each side of contact, but does not
-#   veto a supported normal descent onset. The regular load-cell probe keeps
+#   The speed option affects HX711 descent only, not CR Touch. The restored
+#   direct DEV approach uses its historical speed: 0.5. Each tap is one
+#   native MCU-stopped move to the existing bounded endpoint, without a host
+#   segment loop. lift_speed remains independent. The original withdrawal
+#   acquisition and fit are required; the regular load-cell probe retains
 #   its 0.3-second default window.
 trigger_force:
 force_safety_limit:
@@ -5767,14 +5764,10 @@ force_safety_limit:
 #   trigger_force 10..250, force_safety_limit 100..10000 and greater than
 #   trigger_force. These are allowed configuration ranges, not safe hardware
 #   recommendations. Never guess counts_per_gram in the load_cell section.
-#   trigger_force is now an independent MCU protection, not required normal
-#   completion. Normal acquisition stops on supported onset between finite
-#   MCU-scheduled advances. The analog guard stays armed during host waits;
-#   no additional descent is queued until fresh samples have been evaluated.
-#   Position is held after each advance for the existing three-period sample
-#   budget (37.5 ms at 80 Hz). The MCU guard remains armed while fresh data
-#   arrive and the host computes. The original total travel floor remains
-#   unchanged, with no deeper retry on missing onset.
+#   trigger_force stops the native nozzle descent on the MCU. The raw
+#   force_safety_limit, sensor/communication monitoring and existing total
+#   travel endpoint remain active. Reaching that endpoint without a trigger
+#   rejects; there is no deeper retry or host-side onset stopping loop.
 #   Auto Z-offset captures an unloaded point reference at clearance with
 #   the existing ADC averaging API, once per point. The raw safety band
 #   is centered on this fixed reference for all pairs at that point.
@@ -6273,3 +6266,28 @@ All other Klipper micro-controllers use a
 #   to 100000 and changing this value has no effect. The default is
 #   100000. Linux, RP2040 and ATmega support 400000.
 ```
+
+### Native Auto Z-offset backend
+
+The separate `[auto_z_offset_native]` backend references an existing named
+`load_cell`, keeps the CR Touch as the primary probe, and reports a provisional
+pressure-reference offset. Select only this backend or `[auto_z_offset]`.
+The complete settings and selection examples are in
+[Auto_Z_Offset_Native.md](Auto_Z_Offset_Native.md) and
+`config/sample-auto-z-offset-native.cfg`. `sample_retract_dist` must be explicitly
+set to at most 0.5 mm to preserve the current pressure travel allowance. The
+force and raw safety ceilings remain 75 g and 200 g. No firmware change is needed.
+
+`probe_points` is a multiline list of at least three distinct physical bed XY
+pairs. Each point performs native CR Touch sampling and three pressure descents
+with its own local unloaded reference and finite endpoint. Alternatively,
+`probe_point` selects the original single-point cycle; do not specify both.
+All nozzle and sensor destinations must fit native travel limits. Point offsets
+and their spatial range are reported separately without averaging or applying.
+
+`temperature_tolerance` is a positive finite margin in degrees C (default 3).
+Warm-up ends as soon as both heaters are within target +/- this margin,
+including the boundaries, without an additional PID-settling wait. The band is
+also enforced at measurement checkpoints. Out-of-band checkpoint readings,
+changed targets or invalid sensor readings reject the session. Native heater
+control and protections remain active.
