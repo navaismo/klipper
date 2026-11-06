@@ -1,38 +1,41 @@
 # Klipper for the Ender-3 V3 SE
 
-This Klipper fork reuses the original TJC LCD and knob while keeping the
-screen connected to the printer mainboard. The owner confirmed the current
-appearance on an STM32F103RET6 mainboard with a TJC3224T1 display; the
-photos below show this setup on hardware.
+I'm using this Klipper fork on my Ender-3 V3 SE to keep the original LCD
+and knob working, with the screen still connected to the printer mainboard.
+My setup uses an STM32F103RET6 mainboard and a TJC3224T1 display. Alongside
+the LCD support, I'm working on automatic Z-offset calibration using
+CR Touch and the stock load cell.
 
-## Fork features
+## What it adds
 
-- Idle screen at startup and after completed/cancelled jobs, with the
-  connected MCU's firmware revision and compilation date below `Idle`.
-- Host-designed knob menus for homing, preheating, 10 mm XYZ movements,
-  and filament loading/unloading at 240 C with press-to-cancel support.
-- A static card rendered before the first print G-code: 120x120 displayed
-  thumbnail, layers, layer height, estimated total duration, material,
-  wrapped filename and first-layer nozzle/bed targets. `PRINTING` is orange.
-- A debounced knob press during printing runs the configured `PAUSE`
-  command once. The card stays visible; resume through Fluidd/Moonraker.
-- On-demand CR Touch Z-offset calibration and load-cell diagnostics;
-  see the experimental workflow and qualification notes below.
-- Screen designs, colors, labels, artwork and navigation stay on the host.
-  Once generic drawing firmware is installed, visual updates need no flash.
+- An idle screen at startup and after a print finishes or is cancelled,
+  with the connected MCU's firmware revision and build date below `Idle`.
+- Knob menus for homing, preheating, moving each axis in 10 mm steps,
+  and loading or unloading filament at 240 C. Press the knob to cancel
+  a filament operation.
+- A print card with a 120x120 thumbnail, layer count, layer height,
+  estimated total time, material, filename and first-layer nozzle/bed
+  targets. The card appears before printing starts, with `PRINTING` in orange.
+- Press the knob during a print to run your configured `PAUSE` command.
+  The card stays visible; resume from Fluidd or Moonraker.
+- Automatic CR Touch Z-offset calibration and load-cell diagnostics,
+  started manually while idle. This part is experimental; see the guide below.
+- Screen layouts, colors, labels, artwork and navigation live on the host.
+  Once the generic drawing firmware is installed, you can change the designs
+  without reflashing the mainboard.
 
-**The print card is intentionally static.** There is no live progress,
-current-layer, remaining-time or temperature refresh during printing or
-pause. Card temperatures come from the file, not heater readings. Only an
-active idle Load/Unload operation refreshes changed nozzle temperatures.
-The mainboard C driver owns LCD USART2, framing and bounded drawing work;
-the host never opens an LCD serial port.
+The print card stays unchanged while printing or paused. It shows the file's
+estimated total time and temperature targets, with no live progress, layer,
+remaining-time or heater updates. The Load/Unload screen shows the current
+nozzle temperature while that operation runs with the printer idle.
 
-## Hardware photos
+The mainboard's C driver handles the LCD connection over USART2, serial
+frames and drawing commands. The host prepares the screen content without
+opening an LCD serial port.
 
-These owner-supplied photos replace the earlier idle/card examples. They
-show the current idle footer, both menus and two print cards. They confirm
-appearance, not measured rendering time or print-quality impact.
+## On my printer
+
+Here are the idle screen, both menus and two print cards on my printer.
 
 <img src="Screenshots/IdleV7.jpg" alt="Idle screen with Klipper branding and MCU firmware revision and build date" width="300">
 
@@ -46,78 +49,85 @@ appearance, not measured rendering time or print-quality impact.
 
 ## Setup
 
-Follow the [complete LCD and knob setup guide](docs/TJC_LCD_Setup.md)
-for first installation, firmware settings, dependencies, configuration,
-commands, troubleshooting, updates and rollback.
+The [LCD and knob setup guide](docs/TJC_LCD_Setup.md) covers installation,
+firmware settings, dependencies, commands, troubleshooting and rollback.
+To get started:
 
-The required setup is:
-
-1. Run this complete fork in the Klippy service. The current development
-   LCD branch is `feature/lcd_status`; the combined development branch is
-   `feature/Auto_Z_offset`. Copying only extras into upstream
-   Klipper does not install the virtual SD hooks.
+1. Run the complete fork as your Klippy service. `feature/lcd_status`
+   contains the LCD work; `feature/Auto_Z_offset` combines it with Z-offset
+   development. Copying just the extras into upstream Klipper leaves out
+   the virtual SD hooks needed to prepare the screen before a print.
 2. Use mainboard firmware with `TJC_LCD_VERSION=1`, `TJC_JOB_VERSION=5`,
-   `TJC_DRAW_VERSION=1`, and GPIO button support. Keep the confirmed 28 KiB
-   bootloader, 8 MHz crystal and USART1 host settings. An already compatible
-   MCU needs no reflash for these new designs.
+   `TJC_DRAW_VERSION=1`, and GPIO button support. For this board, keep the
+   28 KiB bootloader, 8 MHz crystal and USART1 host settings. If your MCU
+   already has these capabilities, the screen designs need no reflash.
 3. Install [Klippy requirements](scripts/klippy-requirements.txt), including
    Pillow, in the running service's Python environment.
 4. Include [sample-tjc-lcd.cfg](config/sample-tjc-lcd.cfg) once in the active
    printer configuration. It enables `[tjc_lcd]`, `[lcd_status]` and
-   `[tjc_menu]`; retain the existing virtual SD path and printer settings.
+   `[tjc_menu]`. Keep your existing virtual SD path and printer settings.
 5. Reload Klipper while idle. Enable slicer PNG/JPEG thumbnails, preferably
    at least 192x192, and start prints normally from Fluidd/Moonraker.
 
 Do not add LCD commands or scripts to `START_PRINT`. With the default
 `auto_prepare: True`, metadata and all drawing complete before the first
-file G-code. Metadata/render failures prevent start; thumbnail failures
-allow a text-only card and report warnings. The prepared 96x96 RGB565 image
-is displayed at 120x120 with its colors preserved.
+file G-code runs. If metadata collection or rendering fails, the print
+will not start. If only the thumbnail fails, you get a warning and a
+text-only card. Thumbnails are prepared as 96x96 RGB565 images and displayed
+at 120x120 without changing their colors.
 
-The working host link is USART1 PA9/PA10 at 250000 baud over the mainboard's
-USB-C connection. LCD USART2 reserves PA2/PA3 at 115200 baud. The knob pins
-are `encoder_pins: ^PA11, ^PA12` and `click_pin: ^!PB1`. Do not assign them
-to other devices or enable a generic `[display]` driver for this LCD.
+My setup connects the host through USART1 PA9/PA10 at 250000 baud over the
+mainboard's USB-C connection. The LCD uses USART2 PA2/PA3 at 115200 baud.
+The knob pins are `encoder_pins: ^PA11, ^PA12` and `click_pin: ^!PB1`.
+Do not assign them to other devices or enable a generic `[display]` driver
+for this LCD.
 
 ## Knob operation
 
-Turn either way from visible Idle to open Menu. Clockwise highlights the
-next entry down; counterclockwise highlights the previous entry. Click to
-enter/execute. Hold for 0.8 seconds to return to Idle, as indicated by
-`Press&Hold Knob: Idle Screen`. An idle click does nothing.
+Turn the knob either way while the idle screen is visible to open the menu.
+Turn clockwise to move down or counterclockwise to move up, then click to
+open a submenu or run the selected action. Hold for 0.8 seconds to return
+to Idle, following the `Press&Hold Knob: Idle Screen` hint. Clicking while
+idle does nothing.
 
-Fast turns share one pending redraw, with a 200 ms cooldown after the
-previous draw completes. Successful Home, Preheat and Movement actions
-keep the menu/highlight without redrawing. Home uses the configured `G28`;
-preheat sets bed 50 C/nozzle 170 C. Movement requires homing and a full
-in-range 10 mm destination; Front is Y +10 mm and Back is Y -10 mm.
+Fast turns are limited to one pending selection update, with a 200 ms
+pause after each redraw to avoid building up a queue. Home, Preheat and
+Movement leave the menu and highlight visible without redrawing after a
+successful action. Home runs your configured `G28`; Preheat sets the bed
+to 50 C and the nozzle to 170 C. Movement requires homed axes and enough
+travel for the full 10 mm step. Front moves Y +10 mm; Back moves Y -10 mm.
 
 Load heats to 240 C, feeds 50 mm at F800 and 40 mm at F400. Unload heats
 to 240 C, purges 15 mm at F400 and retracts 90 mm at F800. Speeds are
-mm/min. `Press to cancel` stops after the active drawing transaction or
-queued extrusion segment (at most 1 mm), turns the nozzle off and returns
-to Menu. Completion and recoverable errors also turn the nozzle off;
-G-code state is restored and the bed target is unchanged.
+mm/min. Press the knob to cancel: the active drawing transaction or queued
+extrusion segment finishes first (at most 1 mm of extrusion), then the
+nozzle turns off and the main menu returns. Completion and recoverable
+errors also turn the nozzle off. The operation restores G-code state and
+leaves the bed target unchanged.
 
-During printing only a fresh debounced press runs `PAUSE`; rotations and
-paused clicks do nothing. Pause/cancel clicks do not use the navigation
-cooldown. Resume through the normal host UI. The full
+During a print, each new debounced press runs `PAUSE` once. Rotations do
+nothing during printing or pause, and clicks do nothing while paused.
+Pause and filament-cancel clicks bypass the navigation delay. Resume from
+Fluidd or your usual host UI. The full
 [controls and action table](docs/TJC_LCD_Setup.md#knob-controls-and-actions)
 describes the menu and its limits.
 
 ## Commands and diagnostics
 
-While idle, `LCD_PREPARE FILENAME="parts/example.gcode"` prepares data only;
-`LCD_RENDER FILENAME="parts/example.gcode"` draws a test card without
-starting a print. After an LCD error, explicit idle `LCD_RENDER` retries
-bounded initialization before drawing; automatic print preparation still
-rejects a failed LCD. No timeout is accepted as success.
+To check a file while idle, run
+`LCD_PREPARE FILENAME="parts/example.gcode"` to prepare its data, or
+`LCD_RENDER FILENAME="parts/example.gcode"` to draw a test card without
+starting a print. If the LCD previously failed, `LCD_RENDER` attempts to
+initialize it again before drawing. The retry has a timeout and must
+succeed before drawing starts. Automatic print preparation still blocks
+printing if the LCD has failed.
 
-`TJC_LCD_IDLE` restores Idle and closes the menu. `TJC_LCD_INIT` requests
-initialization; `TJC_LCD_CLEAR COLOR=0` requests a black clear. Wait for
-`tjc_lcd.state: ready` after initialization/clear. Inspect `lcd_status`,
-`tjc_lcd` and `tjc_menu` through the usual printer object API; reads are
-passive. All manual LCD commands reject printing/paused jobs.
+Use `TJC_LCD_IDLE` to return to Idle and close the menu, `TJC_LCD_INIT`
+to initialize the LCD, or `TJC_LCD_CLEAR COLOR=0` to clear it to black.
+After initializing or clearing, wait for `tjc_lcd.state: ready`.
+You can inspect `lcd_status`, `tjc_lcd` and `tjc_menu` through the printer
+object API without triggering any action. Manual LCD commands are only
+available when no job is printing or paused.
 
 References: [setup and recovery](docs/TJC_LCD_Setup.md),
 [configuration](docs/Config_Reference.md#lcd_status),
@@ -136,10 +146,10 @@ References: [setup and recovery](docs/TJC_LCD_Setup.md),
 > value. **AN INCORRECT OFFSET CAN DRIVE THE NOZZLE INTO THE BUILD SURFACE
 > AND DAMAGE IT.**
 
-CR Touch remains the primary probe for homing and bed mesh. The stock load
-cell provides nozzle-contact measurements only to calculate its Z-offset;
-it does not replace CR Touch or register another virtual endstop. Start
-calibration on demand while the printer is idle and unpaused.
+CR Touch handles homing and bed mesh as usual. The stock load cell measures
+nozzle contact to calculate the CR Touch Z-offset, without replacing the
+probe or adding another virtual endstop. Start calibration manually while
+the printer is idle and unpaused.
 **Do not add it to PRINT_START, startup or KAMP.** Printing continues to use
 the saved offset and the usual adaptive mesh.
 
@@ -147,12 +157,13 @@ The two-point workflow uses physical bed coordinates X28/Y28 near the cell
 as P1, and X110/Y110 at the center as P2. Each CR Touch measurement is paired
 with nozzle contact at the same physical point, accounting for probe XY
 offsets. P1 supplies the candidate; P2 validates agreement without averaging.
-The owner has completed two-point runs with LCD phase updates on hardware;
-initial first-layer qualification remains separate from measurement success.
-An investigation of a systematic difference from the working printing offset
-is documented in the [diagnostic audit](docs/AUTO_Z_OFFSET_PLAN.md#systematic-offset-investigation-2026-10-30).
-Keep the working offset; experimental candidates remain diagnostic-only until
-the cause is understood. Repeatability alone does not establish accuracy.
+I've completed two-point runs on my printer with the LCD showing each
+calibration phase. A successful run still needs a first-layer check.
+I'm investigating a systematic difference from the offset that works for
+printing; the [diagnostic audit](docs/AUTO_Z_OFFSET_PLAN.md#systematic-offset-investigation-2026-10-30)
+has the details. Keep your working offset while that difference is unresolved
+and treat experimental results as diagnostic data. Repeatable measurements
+can still give an inaccurate offset.
 
 ### 1. Configure and check the load cell
 
@@ -282,19 +293,21 @@ spatial_tolerance: 0.025
 ```
 
 Speeds are in mm/s and forces are in grams. The contact speeds, retract
-distance and 75/200 g thresholds above come from this printer's test setup;
-they require local qualification, not just a successful config load.
+distance and 75/200 g thresholds above are what I use for testing on my
+printer. Check them on your own machine before relying on them; loading
+the configuration successfully does not validate nozzle contact.
 Keep the established force limits when updating an already qualified setup.
 `horizontal_move_z` must exceed the current probe offset. Both nozzle and
 CR Touch positions must be reachable for each physical point. This workflow
 does not support configured axis-twist, skew or thermal-Z compensation.
 
-The temperature settings shown use the software defaults: bed/nozzle minima
-are 50/170 C. Normal PID excursions pause warm-up accumulation or allow a
-bounded recovery wait; changed targets and invalid readings reject the run.
-Select tolerances for normal temperature variation, not to hide sensor faults.
-The existing MCU analog trigger stops nozzle descent, while force, raw-range,
-acquisition and contact-fit checks reject invalid measurements.
+The temperature settings above are the software defaults, with minimum
+bed/nozzle targets of 50/170 C. Normal PID fluctuations pause the warm-up
+timer or allow a limited wait for recovery. Changed targets or invalid
+readings stop the run. Set the tolerance to accommodate normal temperature
+variation without hiding sensor faults. The MCU analog trigger stops nozzle
+descent, and force, raw-range, acquisition and contact-fit checks reject
+invalid measurements.
 
 ### 4. Run the automatic cycle and review the result
 
@@ -325,9 +338,14 @@ pair, CR Touch can take several readings according to its configured
 `[bltouch] samples`; three probe readings in the console do not mean three
 independent contact tests.
 
-Each local range must pass
-`offset_tolerance`; the difference between point medians must pass
-`spatial_tolerance`. P1's median is the candidate, and P2 only validates it.
+At each point, the spread between results must stay within
+`offset_tolerance`. The difference between the two point medians must stay
+within `spatial_tolerance`. P1's median becomes the candidate; P2 checks it.
+Each pair estimates contact onset during descent, accounting for drift and
+checking noise, correlation and the fitting window. Withdrawal measurements
+help diagnose hysteresis but do not have to agree with descent for a candidate
+to pass. If contact onset cannot be resolved, the run stops rather than
+falling back to an older fit. Passing these checks does not prove accuracy.
 
 **Any failed contact or invalid measurement stops the sequence:** it does not
 continue with the next test/pair or accept the remaining samples. Force/raw
@@ -338,10 +356,28 @@ Previous heater targets are restored on exit, the mesh stays cleared and the
 existing offset remains active. KAMP can create a fresh mesh for the next
 print as usual. Successful measurement leaves a candidate in memory only.
 
-For initial qualification, keep a backup of the working configuration and
-validate first-layer behavior before adopting a new offset.
+Before trying a new offset, back up your working configuration and plan to
+watch the first layer. To try a valid normal candidate without saving it,
+run:
 
-To explicitly approve a validated candidate and then persist it:
+```gcode
+AUTO_Z_OFFSET_APPLY
+```
+
+This changes only the temporary native G-code Z correction, with no immediate
+movement. It survives G28 in the current print-start macro. After ending or
+cancelling the print and draining motion, restore the previous correction:
+
+```gcode
+AUTO_Z_OFFSET_ROLLBACK
+```
+
+Diagnostic, rejected or stale results cannot be applied. The saved probe
+offset and load-cell calibration remain unchanged. Other macros that reset
+G-code Z offsets can cancel the trial; restarting Klipper discards it.
+See the [trial commands](docs/G-Codes.md#auto_z_offset_apply) for details.
+
+Once you've checked a fresh validated candidate and want to save it, run:
 
 ```gcode
 AUTO_Z_OFFSET_ACCEPT
@@ -375,16 +411,18 @@ accept the same optional bed/nozzle targets.
 
 ### LCD calibration views
 
-The optional LCD calibration view highlights CR Touch Reference, Nozzle Contact
-and Computing Offset without clearing the screen between phases. It requires
-mainboard firmware with `TJC_CANVAS_VERSION=1` or the menus' existing
-`TJC_DRAW_VERSION=1` under the LCD build option. A drawing-only MCU reuses
-its installed generic executor, without a new flash. The panel firmware
-and print-card protocol v5 are unchanged. The host
-supplies bounded drawing coordinates, and each update completes before sensor
-measurements. Only changed rows and the status strip are repainted; no LCD
-traffic runs during sensor acquisition or contact fitting. These views run
-only during idle calibration, never during a print.
+The optional calibration screen highlights CR Touch Reference, Nozzle Contact
+and Computing Offset as the run progresses. It updates changed rows and the
+status strip without clearing the screen between phases.
+
+It needs mainboard firmware with `TJC_CANVAS_VERSION=1` or the menus'
+`TJC_DRAW_VERSION=1` under the LCD build option. If you already have the
+generic drawing firmware for the menus, no reflash is needed. The panel
+firmware and print-card protocol v5 stay the same.
+
+The host prepares each screen update, which finishes before the sensor
+measurements begin. There is no LCD traffic during sensor acquisition or
+contact fitting, and these screens only appear during idle calibration.
 
 | Warm-up | CR Touch reference | Nozzle contact |
 | --- | --- | --- |
