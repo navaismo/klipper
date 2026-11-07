@@ -459,19 +459,16 @@ The following information is available for each `[load_cell name]`:
   start of measurements.
 - `sample_rate`: The sensor's sample rate in samples per second.
 
-## auto_z_offset
+## auto_z_offset_cr
 
-The following information is available for `[auto_z_offset]`:
+Use the Contact Regression method through `[auto_z_offset_cr]`:
+
+- `backend`: `regression`.
+- `method`: `Contact Regression`.
 
 - `state`: `disconnected`, `idle`, `heating`, `measuring`, `contact_ready`,
-  `candidate`, `rejected`, `accepted`, `diagnostic_complete`,
-  `diagnostic_rejected`, or `error`. Diagnostic completion only describes
-  diagnostic descent-onset support; it never qualifies an offset for
-  application. The original withdrawal/branch comparison is informational
-  in DIAGNOSTIC mode, even when that legacy comparison is rejected.
-- `contact_verified`: Whether successful separate contact tests have been
-  recorded at every point with current references. Informational only;
-  CALIBRATE does not require prior manual test qualification.
+  `candidate`, `rejected`, `accepted`, or `error`.
+- `contact_verified`: Whether supervised contact is qualified at every point.
 - `stage`: Current/last step, such as `preflight`, `warm-up`, `mesh clear`,
   `homing`, `Test P1 pair 1`,
   `Calibrate P2 pair 3`, `spatial validation`, or `complete`. Failures retain
@@ -479,7 +476,8 @@ The following information is available for `[auto_z_offset]`:
 - `verified_points`: Sorted one-based indices of qualified configured points.
 - `candidate`: Whether an unaccepted validated result is available.
 - `result`: Null or an object with flattened paired `offsets`, global
-  `minimum`, `maximum`, and `range`, in mm. `points` contains one report per
+  `minimum`, `maximum`, and `range`, in mm, plus `backend` and `method`.
+  `points` contains one report per
   location: `point_index`, physical XY `point`, local `offsets`, `median`,
   `minimum`, `maximum`, `range`, and diagnostic `contacts`. Each contact has
   the same fields as `last_contact`. Two-point and optional four-point modes
@@ -492,80 +490,18 @@ The following information is available for `[auto_z_offset]`:
   retains this report without a candidate. Acceptance retains the report but
   consumes the candidate; it does not change the active probe offset.
 - `error`: The last measurement/cleanup error, or null.
-- `last_contact`: Null or the most recent completed pair's diagnostic report,
-  including a pair rejected by the post-acquisition contact-model check.
-  Contains one-based `point_index` and `sample_index`, `point` (physical bed
+- `last_contact`: Null or the most recent successful pair's diagnostic report.
+  Contains `backend`, `method`, one-based `point_index` and `sample_index`, `point` (physical bed
   XY), `cr_trigger_z`, `force_trigger_z`,
   `regression_z`, `regression_delta` (regression minus force-trigger Z),
-  `offset` (null for a rejected model), `model_offset` (the unmodified numerical
-  formula result), `saved_offset`, and `mesh_active` (False for these
-  measurements). `contact_bounds` records `minimum_z`, `maximum_descent`,
-  and the fresh CR Touch `surface_reference_z` for the nozzle approach.
+  `offset`, `saved_offset`, and `mesh_active` (False for these measurements).
   All positions/distances are in mm in the toolhead frame. Also contains
   `temperatures_before` and `temperatures_after`: each has `bed` and `nozzle`
   objects with `measured` and `target` in C, sampled around the nozzle tap.
   This report is available after TEST_CONTACT without staging an offset.
-  Local DEV `AUTO_Z_OFFSET DIAGNOSTIC=1` also retains this report, with
-  `diagnostic_only: True`, `eligible_for_application: False`,
-  `descent_fit_z` and `ascent_fit_z` (null for unsupported branches),
-  `descent_status` and `ascent_status` (the original branch verdicts),
-  `primary_fit_z` (the original LCBestFit result before branch qualification),
-  and
-  `observational_offset` (the unchanged formula result, in mm).
-  Its `offset` is always null, `candidate` is False, `result` is null,
-  and no point is qualified, regardless of model consistency. The nested
-  model's `eligible_for_candidate` is a mathematical verdict only and cannot
-  authorize application in this mode.
-  `contact_onset` is the diagnostic descent-only result: `status`
-  (`identified` or `unresolved`), `z` (null when unresolved), `reasons`,
-  `observational_offset` (cr.test_z minus z, or null),
-  `withdrawal_minus_onset_mm`, `supported_window_count`, and `windows`.
-  It always has `diagnostic_only: True`, `eligible_for_application: False`;
-  physical accuracy is unvalidated and physical uncertainty remains unknown.
-  Supported results expose `selected_window_s`, the local
-  `baseline_force_g` at `baseline_time_s`, `baseline_drift_g_per_s`,
-  `baseline_rms_g`, `compression_slope_g_per_mm`, `effective_samples`,
-  and `delta_bic` (evidence against a drifting-baseline-only model).
-  Windows retain `model_z` even when unresolved, but only supported windows
-  have non-null `z`. They report sample/effective counts per fitted region,
-  residual RMS, baseline drift, compression slope, the correlation-adjusted
-  profile interval and observed sample spacing. `window_span_mm` and
-  `interval_z_mm` describe the supported-window estimates and their envelope.
-  The nominal 95% profile convention is approximate and model-conditional;
-  it is not a calibrated physical-contact confidence level. Shared sensor
-  delay, force-transfer bias and model misspecification remain unknown.
-  `contact_qualification` contains `status` (`rejected` or
-  `internally_consistent`), `eligible_for_candidate`, reason codes in
-  `reasons`, `maximum_span_mm` (the configured offset tolerance),
-  `branch_disagreement_mm`, and, when available, `descent_fit_z`,
-  `ascent_fit_z`, `primary_fit_z`, `primary_ascent_difference_mm`,
-  `contact_model_span_mm` (lowest/highest estimate) and `model_span_mm`
-  (their difference). These spans are descriptive disagreement, not
-  confidence intervals. `physical_contact_verified` is False and
-  `physical_uncertainty_mm` is null (unknown); internal agreement does not
-  establish physical accuracy or authorize applying/saving calibration.
-  `window_sensitivity` is a diagnostic-only object, also retained in the
-  `Load cell tap diagnostic` JSON log. `descent` and `ascent` each contain:
-  `windows`, `valid_window_count`, `distinct_window_count`, and
-  `max_z_variation_mm` (maximum minus minimum fitted Z across at least two
-  distinct valid windows, otherwise null). Each window records `window_s`
-  (null means full recorded descent), `time_reference`, `status` and `z`.
-  Identified fits also record sample/analyzed counts, stride, actual
-  `data_time_bounds_s`, loaded/free counts, `force_slope_g_per_mm`, fitted
-  `baseline_g`, `residual_rms_g`, `loaded_residual_rms_g` and
-  `free_residual_rms_g`. Errors or inadequate time/sample support have an
-  explicit status, never a fabricated Z or zero sensitivity.
-  The top-level object contains `branch_difference_mm` (ascent minus descent,
-  when comparable), `status` (`available`, `partial`, `unavailable`, or a
-  reference/timing/diagnostic failure), `diagnostic_only` (True),
-  `physical_contact_bias` (`unknown`) and `absolute_accuracy_validated`
-  (False). No sensitivity rejection threshold is used. The existing verdict
-  remains in the separate `contact_qualification` object.
 
 Homing, load-cell recalibration, disconnect and shutdown invalidate the result.
-They also clear `last_contact`; a new run or failed acquisition clears it.
-A model-consistency rejection retains its completed report and reason, while
-clearing all qualification and candidates.
+They also clear `last_contact`; a new run or failed measurement clears it.
 Configuration changes to the probe or force calibration also prevent accepting
 a stale candidate. Nothing is persisted until explicit acceptance and the
 subsequent standard `SAVE_CONFIG` operation.
@@ -922,3 +858,21 @@ component one could use
 one wanted to find the component associated with the "extruder"
 object, one could use
 `{printer.toolhead.position[printer.toolhead.extra_axes.extruder]}`.
+
+## auto_z_offset_ft
+
+Use Force Trigger through `[auto_z_offset_ft]`. Inspect
+`backend` (`force_trigger`), `method` (`Force Trigger`), `busy`,
+`error`, `result` (null until a completed session) and
+`eligible_for_application` (always false). `result` contains `points` (ordered
+per-point reports), `reference_point` (1), `spatial_range` (maximum minus minimum
+point offset, diagnostic only), and the first point's fields retained at the top
+level for compatibility: `point`,
+`cr_test_z`, `cr_bed_z`, `raw_bed_reference_z`, `minimum_z`, `pressure_z`,
+`pressure_samples` (Z, original MCU print-time and sample count),
+`pressure_range`, `provisional_z_offset`, `reference_kind`,
+`point_index` (1-based), `safety_reference_counts` (local unloaded ADC anchor),
+`applied_adjustment_mm` (zero), `eligible_for_application` (false) and
+`saved` (false). New/failed sessions, homing, sensor calibration and disconnect
+invalidate the previous report. See
+[Auto_Z_Offset_Force_Trigger.md](Auto_Z_Offset_Force_Trigger.md).

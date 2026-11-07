@@ -1,5 +1,43 @@
 # Configuration Changes
 
+20261106 (fork Auto Z-offset names): Rename `[auto_z_offset]` to
+`[auto_z_offset_cr]` (Contact Regression) and `[auto_z_offset_native]` to
+`[auto_z_offset_ft]` (Force Trigger). Update section headers in existing
+include copies and API/macro object references before restarting. Select
+exactly one of `auto_z_offset_regression.cfg` or
+`auto_z_offset_force_trigger.cfg`; keep the shared sensor calibration outside
+both files. Keep the AUTO_Z_OFFSET command unchanged. Use `backend: regression`
+or `backend: force_trigger` in status, with the corresponding method name.
+No MCU rebuild, movement or estimator change is required by this rename.
+
+20261106 (fork native contact rollback): Restore the direct MCU-force-triggered
+nozzle acquisition used before segmented onset stopping. Remove the segment
+executor, streaming snapshot polling and per-segment confirmation waits.
+Keep existing per-point travel bounds, native MCU error/force stops, estimator
+selection, offset mathematics and explicit APPLY/ROLLBACK. DEV descent speed
+returns to the recorded 0.5 mm/s; no MCU flash or new setting is required.
+The onset-controlled acquisition entry below is historical and superseded.
+
+20261103 (fork onset-controlled acquisition): Auto Z-offset nozzle searches
+now use finite MCU-scheduled advances and the existing descent-onset
+confidence checks, with the native analog force guard armed continuously.
+A normal stop no longer requires reaching trigger_force; that setting and
+raw force limits remain independent MCU protections. An actual hard-force
+stop without supported onset rejects. Existing floors are unchanged, with
+no deeper retry or global-minimum fallback. No new options or MCU update
+are required. Normal onset stops report null MCU force-trigger fields and
+separate contact-stop metadata; withdrawal fit failures alone are diagnostic.
+The estimator, measured-offset formula, explicit APPLY/ROLLBACK and saved
+calibration are unchanged. Arbitrary initial offsets do not establish a
+fresh-install-safe search envelope; out-of-envelope acquisition still fails.
+
+20261103 (fork normal contact onset): Normal Auto Z-offset commands now use
+the existing supported descent-onset estimate. Withdrawal/branch agreement
+is diagnostic only; offset_tolerance still limits within-point repeatability
+and remains in the legacy branch report. Unresolved onset rejects without a
+legacy-fit fallback. No new configuration or MCU update is required. Motion,
+thermal/raw-force limits and explicit application/rollback are unchanged.
+
 20261102 (fork diagnostic contact onset): DIAGNOSTIC=1 additionally estimates
 descent onset against a drifting baseline. Diagnostic state follows onset
 support; the original withdrawal/branch verdict is informational in this mode.
@@ -79,7 +117,7 @@ session, without accepting/saving. Existing commands remain available. With
 tjc_lcd, measurement commands show a host-prepared travel-only illustration
 through the existing v5 renderer; no MCU/panel firmware update is needed.
 Each LCD transfer drains before measurement. Error messages include the
-failed stage/point/pair; auto_z_offset.stage exposes the last step.
+failed stage/point/pair; auto_z_offset_cr.stage exposes the last step.
 
 20261029 (fork two-point Auto Z-offset): `probe_points` now accepts two
 locations with three fresh pairs each. The first point supplies the candidate

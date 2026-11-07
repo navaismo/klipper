@@ -8,7 +8,7 @@ import os
 import unittest
 from unittest import mock
 
-from test_auto_z_offset import auto, Config, Gcmd, lcprobe, Printer, ROOT
+from test_auto_z_offset_cr import auto, Config, Gcmd, lcprobe, Printer, ROOT
 from test_load_cell_diagnostics import curve
 
 spec = importlib.util.spec_from_file_location('contact_replay', os.path.join(
@@ -221,7 +221,7 @@ class PairIntegrationTests(unittest.TestCase):
             'load_cell_retract_dist': .5}
         with mock.patch.object(lcprobe, 'LoadCellTapHelper',
                                return_value=self.tap):
-            self.module = auto.AutoZOffset(Config(
+            self.module = auto.ContactRegressionAutoZOffset(Config(
                 self.printer, {'probe_point': [28., 28.]}))
         self.module._connect()
         self.module._check_geometry()
@@ -247,7 +247,7 @@ class PairIntegrationTests(unittest.TestCase):
         for record in records()[:2]:
             self.tap.tapping_move.run_tap.reset_mock()
             with self.assertRaisesRegex(RuntimeError,
-                                        'contact_branches_disagree'):
+                                        'window_models_disagree'):
                 self.measure(record)
             self.assertIsNone(self.module.last_contact['offset'])
             self.assertAlmostEqual(self.module.last_contact['model_offset'],
@@ -260,7 +260,8 @@ class PairIntegrationTests(unittest.TestCase):
     def test_consistent_pair_preserves_original_offset_formula(self):
         record = records()[2]
         self.assertAlmostEqual(self.measure(record),
-                               record['recorded_offset_mm'])
+            record['cr_test_z'] - auto.load_cell_contact_onset.estimate(
+                record['diagnostic'])['z'])
         self.assertFalse(self.module.last_contact['contact_qualification']
                          ['physical_contact_verified'])
 
@@ -272,7 +273,7 @@ class PairIntegrationTests(unittest.TestCase):
             # Configure the normal paired path, then suppress its observer.
             self.measure(record)
             self.tap.tapping_move.get_contact_diagnostics.return_value = None
-            with self.assertRaisesRegex(RuntimeError, 'missing_contact_report'):
+            with self.assertRaisesRegex(RuntimeError, 'missing_acquisition'):
                 self.module._measure_pair(Gcmd(), Gcmd(), [], 0, 0,
                                           self.module._fingerprint())
             self.assertIsNone(check.call_args.args[0])
@@ -288,7 +289,7 @@ class PairIntegrationTests(unittest.TestCase):
 
     def test_workflow_retains_rejection_and_invalidates_qualification(self):
         self.configure_record(records()[1])
-        with self.assertRaisesRegex(RuntimeError, 'contact_branches_disagree'):
+        with self.assertRaisesRegex(RuntimeError, 'window_models_disagree'):
             self.module.cmd_TEST_CONTACT(Gcmd(params={'COLD': 1}))
         status = self.module.get_status(0.)
         self.assertEqual(status['state'], 'error')

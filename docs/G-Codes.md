@@ -1070,60 +1070,19 @@ This command takes a reading from the load cell. The response is the percentage
 of the sensors range that was read and the raw value in counts. If the load cell
 is calibrated a force in grams is also reported.
 
-### [auto_z_offset]
+### [auto_z_offset_cr]
 
-The fork's [auto_z_offset](Config_Reference.md#auto_z_offset) extra calibrates
+Use **Contact Regression (`regression`)** with `[auto_z_offset_cr]` to estimate
+nozzle contact from the force/Z withdrawal curve using LCBestFit. Select
+`auto_z_offset_regression.cfg`; use only one method include at a time.
+
+The fork's [auto_z_offset_cr](Config_Reference.md#auto_z_offset_cr) extra calibrates
 the existing CR Touch probe using a named load cell. It has no automatic
 print-start, startup or idle trigger. All contact commands move the printer
-and heat the bed/nozzle; perform the staged qualification in
+and heat the bed/nozzle; follow the setup and limitations in
 [Automatic Z-offset](AUTO_Z_OFFSET_PLAN.md) before using them.
 
 #### AUTO_Z_OFFSET
-
-The normal workflow and AUTO_Z_OFFSET_CALIBRATE are available. The optional
-observational mode never creates an applicable candidate:
-
-`AUTO_Z_OFFSET DIAGNOSTIC=1 [POINT=1] [COLD=1]
-[BED_TEMP=<degrees>] [NOZZLE_TEMP=<degrees>]`
-
-Run exactly one paired measurement at configured P1 through the existing
-CR Touch, HX711 tap and LCBestFit. Keep the original ascent-based calculation
-for comparison and also compute a diagnostic descent-onset estimate.
-CR Touch retains its configured sample count; there is only one nozzle tap,
-no second point, no contact retry and no subsequent calibration series.
-Require homed XYZ and an already inactive mesh; this bounded diagnostic does
-not run G28 or clear the mesh automatically. It uses the same integrated
-CR Touch-relative nozzle limit as the normal workflow, without `test_*`
-configuration or command-level force/travel overrides.
-
-`COLD=1` requires both heaters off and valid readings within the existing
-cold-test range; omit temperature parameters in this mode. Without COLD,
-use the existing configured bed/nozzle targets and thermal checks, restoring
-previous targets afterward. For an already prepared cold DEV printer:
-
-```text
-AUTO_Z_OFFSET DIAGNOSTIC=1 COLD=1
-```
-
-Report the MCU trigger, existing branch estimates, original primary fit and
-observational offset, plus `contact_onset`: the descent-only estimate and its
-own observational offset if supported. A drifting baseline is fitted in real
-time, with a positive compression hinge in Z. Existing descending analysis
-windows test sensitivity without a printer-specific correction or new setting.
-The onset verdict uses evidence against drift alone, residual autocorrelation,
-profile/sampling intervals and agreement between supported windows. When
-windows disagree, report unresolved rather than selecting a convenient Z.
-The original withdrawal/branch verdict remains a diagnostic comparison and
-does not require identical contact coordinates in this mode. It does not
-select, average with or veto a supported descent onset. Diagnostic completion
-now follows the descent-onset verdict; it never authorizes application.
-The normal workflow retains its existing estimator and qualification policy.
-A completed unresolved onset finishes as `diagnostic_rejected` after cleanup,
-retaining the original model results and new window evidence. Sensor, MCU, motion, thermal,
-invalid-result and cleanup errors still stop execution and propagate.
-Even an internally consistent diagnostic creates no candidate, result or
-point qualification. AUTO_Z_OFFSET_ACCEPT refuses it; nothing is staged,
-applied or saved. Observational repeatability is not physical validation.
 
 `AUTO_Z_OFFSET [BED_TEMP=<degrees>] [NOZZLE_TEMP=<degrees>]`:
 Run the two-point workflow with one command. Require exactly two configured
@@ -1145,13 +1104,12 @@ On failure, stop the sequence and report the stage, point/pair and original
 error. Spatial rejection retains both point reports without a candidate.
 Restore previous heater targets and retain the existing probe offset.
 No separate G28 or BED_MESH_CLEAR is needed for this command. Targets default
-to 50 C bed and 170 C nozzle unless configured otherwise in `[auto_z_offset]`;
+to 50 C bed and 170 C nozzle unless configured otherwise in `[auto_z_offset_cr]`;
 BED_TEMP/NOZZLE_TEMP explicitly override them. The cleared mesh stays cleared.
 This command does not alter print-start or KAMP macros. Acceptance and
 SAVE_CONFIG remain separate user actions.
 
-With `[tjc_lcd]` and firmware advertising `TJC_CANVAS_VERSION=1` or
-`TJC_DRAW_VERSION=1`, all three
+With `[tjc_lcd]` and firmware advertising TJC_CANVAS_VERSION=1, all three
 measurement commands show the calibration layout. Highlight CR Touch Reference
 before the CR Touch reading, Nozzle Contact before baseline/tare/contact,
 and Computing Offset for final candidate validation. The host supplies bounded
@@ -1159,24 +1117,9 @@ drawing coordinates and text; the MCU owns framing and USART2. Draw the screen
 once, then repaint only changed rows and the small status strip. Each partial
 update and final fence finish before measurements. No periodic animation or
 LCD traffic runs during acquisition/fit. The panel firmware is unchanged;
-the existing generic drawing executor is reused without reflashing when
-the coordinate backend is absent. Without either capability, calibration
-can run with a console warning and no
+the mainboard firmware must be rebuilt/flashed once for the coordinate API.
+Without that capability, calibration can run with a console warning and no
 LCD changes; there is no fallback to blinking full-card redraws.
-
-All Auto Z-offset nozzle approaches have a finite endpoint derived from
-that pair's fresh CR Touch surface reference: `minimum_z = cr.bed_z -
-load_cell_retract_dist`, where `load_cell_retract_dist` is the existing tap's
-`sample_retract_dist`. Maximum descent is the starting travel clearance minus
-that endpoint. The endpoint must be finite, below clearance and strictly
-above the native Z minimum; otherwise refuse the nozzle approach. Never clip
-an invalid endpoint to the global minimum. This uses the saved CR Touch
-geometry as native probing does; it does not change the offset formula or
-certify a physical force limit. MCU raw-force/error protection stays active.
-A missing trigger reaches only this endpoint, raises the native no-trigger
-error, and performs the existing upward cleanup when Z remains homed and
-Klipper is operational. No deeper retry or automatic offset save occurs.
-The local C0 `test_*` options are retired and ignored if still present.
 
 #### AUTO_Z_OFFSET_TEST_CONTACT
 
@@ -1184,9 +1127,9 @@ The local C0 `test_*` options are retired and ignored if still present.
 [NOZZLE_TEMP=<degrees>]`:
 Perform one supervised CR Touch/nozzle pair using the MCU analog trigger and
 existing contact estimator. POINT is the one-based configured point index
-(default 1). This optional single-pair command is not a prerequisite for
-CALIBRATE. Previous point reports are invalidated by changed references,
-homing, disconnect or failed measurements.
+(default 1). Every configured location requires a successful supervised test
+before calibration. Qualification is invalidated by homing, changed probe or
+sensor calibration references, disconnect or a failed contact run.
 No offset is staged or saved. Require homed XYZ, a clean nozzle, a clear
 contact area, a calibrated sensor and an inactive bed mesh.
 After CR Touch measurement, warm-up and a drained move to nozzle clearance,
@@ -1209,55 +1152,16 @@ and requires decreasing force during release. This command automatically
 records replayable force/Z diagnostics in the Klippy log without requesting
 a separate manual paper calibration.
 The console also reports `force_trigger_z`, `regression_z` and their signed
-difference (regression minus trigger). The `auto_z_offset.last_contact`
+difference (regression minus trigger). The `auto_z_offset_cr.last_contact`
 status report retains those values, physical XY and measured/target
-temperatures around the tap. For a one-off manual comparison without
-staging an offset, follow the same-point procedure in
-[Automatic Z-offset](AUTO_Z_OFFSET_PLAN.md#earlier-same-point-manual-comparison).
-Auto Z-offset also writes bounded `Load cell tap diagnostic: ` JSON entries
-from the existing descending/retracting tap, including force/Z/time, origin
-snapshots and diagnostic onset/release comparisons. These estimates do not
-change the primary fit, paired formula or force protections. See the
-version-2 fields `descent_fit_z`, `descent_threshold_z`, `mcu_trigger_z` and
-`ascent_fit_z` in the diagnostic JSON. Fits remain model estimates, not exact
-physical contact measurements. Incomplete/failed coordinate references prevent
-curve comparison; diagnostic failures only emit warnings and do not replace
-the existing probing result or safety errors. Read the
-[systematic error investigation](AUTO_Z_OFFSET_PLAN.md#systematic-offset-investigation-2026-10-30)
-before collecting new contacts. No automatic acceptance or save is performed.
-
-Auto Z-offset now qualifies each completed tap using the existing diagnostic
-report. Both branches must be identified in a consistent coordinate frame,
-with valid acquisition timing and a sustained descending force rise. The
-span of the descending fit, ascending fit and primary result must not exceed
-`offset_tolerance`. Failure rejects the pair without a candidate or retry.
-This check runs after the existing retract/fit; it does not change motion,
-MCU protection, LCBestFit or the offset formula. The ordinary load-cell probe
-retains its existing behavior even when passive diagnostics fail.
-Agreement is internal model consistency, not physical validation: a shared
-force-transfer or coordinate bias can pass. No midpoint correction is applied.
-`last_contact.contact_qualification` explains the decision; a rejected model
-has null `offset` and retains the numerical `model_offset` for investigation.
-
-The existing report also includes diagnostic-only fitting-window sensitivity.
-Descending windows end at the MCU trigger and cover 0.25, 0.5, 1 and 2 seconds,
-plus the full recorded descent. Retraction windows start at the existing
-ascent start and cover 1.5, 2, 3 and 5 seconds when acquisition coverage allows.
-Each supported window reports its contact-model Z, slope and residual RMS;
-the maximum Z variation is reported separately for each branch. The console
-summarizes both variations alongside the unchanged branch-consistency verdict.
-Full-branch fits are reused when possible; there is no new acquisition,
-step-history query or movement. Window failures are isolated and cannot change
-the primary fit or the existing branch verdict. No new rejection threshold
-is applied, and low window sensitivity does not establish absolute accuracy
-or remove an unknown shared physical-contact bias.
+temperatures around the tap. For the measurement sequence and limitations, see
+[Automatic Z-offset](AUTO_Z_OFFSET_PLAN.md).
 
 #### AUTO_Z_OFFSET_CALIBRATE
 
 `AUTO_Z_OFFSET_CALIBRATE [BED_TEMP=<degrees>] [NOZZLE_TEMP=<degrees>]`:
-Require homed XYZ, an idle printer, an inactive mesh and a calibrated sensor;
-no previous manual contact qualification is required. With `probe_points`,
-measure three fresh CR Touch/nozzle pairs at each configured
+Require successful supervised contact at every configured point. With
+`probe_points`, measure three fresh CR Touch/nozzle pairs at each configured
 physical points and report each local median/minimum/maximum/range. Reject
 invalid contacts, non-finite/out-of-range offsets and excessive within-point
 spread immediately, without discarding samples or retrying. Each CR Touch
@@ -1304,6 +1208,21 @@ references, printing/paused jobs, or an already pending probe-offset edit.
 Unrelated pending settings are preserved. The runtime offset is unchanged.
 The user must subsequently issue `SAVE_CONFIG` to write the active printer
 configuration and restart Klipper. That command saves all pending settings.
+
+### [auto_z_offset_ft]
+
+#### AUTO_Z_OFFSET
+
+Select **Force Trigger (`force_trigger`)** with
+`auto_z_offset_force_trigger.cfg` and its `[auto_z_offset_ft]` section.
+`AUTO_Z_OFFSET [BED_TEMP=60] [NOZZLE_TEMP=170]` performs native CR Touch probing
+and three bounded MCU force-triggered nozzle descents at each configured
+physical point (`probe_points`, or legacy single `probe_point`). It clears bed
+mesh and reports `cr.test_z - median(pressure_z)` per point plus the spatial
+range, without applying, staging or averaging. Any failure stops the cycle.
+The top-level provisional reference remains point 1. A loaded force reference is not proof of first physical contact.
+No APPLY, ACCEPT or SAVE_CONFIG operation is provided. Other command parameters
+are rejected. See [Auto_Z_Offset_Force_Trigger.md](Auto_Z_Offset_Force_Trigger.md).
 
 ### [load_cell_probe]
 

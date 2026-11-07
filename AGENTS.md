@@ -291,7 +291,7 @@ For requested commits, follow `docs/CONTRIBUTING.md`: use a short
    The owner approved the simplified MVP architecture: extract shared tap
    construction from load_cell_probe.py into a small helper accepting an
    existing LoadCell; reuse LoadCellProbingMove, TappingMove and LCBestFit.
-   A new auto_z_offset.py coordinates five pairs at one physical point and
+   A new auto_z_offset_cr.py coordinates five pairs at one physical point and
    confirmation/persistence. No second probe/ADC/virtual endstop, multi-point
    sampling, bracketing extras, advanced thermal compensation or experimental
    statistics. Preserve force/error checks and reject invalid measurements.
@@ -311,11 +311,11 @@ For requested commits, follow `docs/CONTRIBUTING.md`: use a short
    Source implementation is authorized; no live heating, hardware operations
    or installed printer configuration changes have been authorized/executed.
    LoadCellTapHelper is now shared by primary load_cell_probe and the secondary
-   auto_z_offset extra, accepting the existing sensor. NumPy is no longer
+   auto_z_offset_cr extra, accepting the existing sensor. NumPy is no longer
    required for tare/diagnostic arrays; the LCBestFit model is reused, with its
    search corrected as described below. Optional filters
    may still require SciPy. Collectors close on failures; invalid/degenerate
-   fits are rejected. auto_z_offset requires explicit speed/lift_speed and
+   fits are rejected. auto_z_offset_cr requires explicit speed/lift_speed and
    locally validated trigger_force/force_safety_limit. It requires homed XYZ,
    an inactive mesh (explicit BED_MESH_CLEAR), and no axis-twist/skew/thermal-Z
    compensation module in the MVP. No KAMP, print-start or MCU C changes.
@@ -492,7 +492,7 @@ For requested commits, follow `docs/CONTRIBUTING.md`: use a short
    Owner baseline -451195 now gives point raw bounds -474172..-428218 with
    114.88636 counts/g. The old 72 g margin was from the global reference and is
    no longer the active Auto band. Logs distinguish saved/point/local tares.
-   Updated auto_z_offset.py and load_cell_probe.py need host reload only; no
+   Updated auto_z_offset_cr.py and load_cell_probe.py need host reload only; no
    config or firmware changes. Hot TEST_CONTACT POINT=1..4 and CALIBRATE remain
    the next hardware sequence. The agent has not executed motion/heat/reload.
    LOAD_CELL_DIAGNOSTIC's additional raw/reference/noise statistics remain
@@ -712,3 +712,13 @@ For requested commits, follow `docs/CONTRIBUTING.md`: use a short
 - Communicate with the user in Spanish. README files, project documentation, and code comments must always be written in English. This is an explicit owner preference; do not write repository prose or comments in Spanish.
 - Keep personal directories, mount names and hostnames out of README files and project documentation, including this guide. Use repository-relative paths or clearly marked generic installation paths.
 - For LCD development, begin with discovery and an architecture proposal; do not implement until the hardware communication path and plan have been reviewed.
+
+- Auto Z-offset naming: use Contact Regression (`regression`) for the
+  LCBestFit backend and Force Trigger (`force_trigger`) for MCU force-trigger
+  reference measurements. Use `config/auto_z_offset_regression.cfg` and
+  `config/auto_z_offset_force_trigger.cfg` as the selection examples. Retain
+  the section/module/status names `[auto_z_offset_cr]` and
+  `[auto_z_offset_ft]`. Update include copies and API clients when migrating
+  from the former section names. Keep public guides concise, in direct English,
+  with the experimental/validate-before-printing warning; omit superseded
+  experiment history from setup instructions.

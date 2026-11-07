@@ -5706,29 +5706,32 @@ data_ready_pin:
 #   The default is 16.
 ```
 
-### [auto_z_offset]
+### [auto_z_offset_cr]
+
+Use **Contact Regression (`regression`)** to estimate nozzle contact with
+LCBestFit from the withdrawal force/Z curve. Select
+`config/auto_z_offset_regression.cfg` or the Force Trigger include, never both.
+Configure `[auto_z_offset_cr]` and query the matching status object.
 
 Fork-specific, user-invoked calibration of `[bltouch] z_offset` using one
 existing named `[load_cell]`. Keep CR Touch as the primary `probe`; do not
 also configure `[load_cell_probe]`. The sensor backend and MCU analog-trigger
 support must be available in the installed firmware. No new C protocol is
-introduced. See [setup and limitations](AUTO_Z_OFFSET_PLAN.md).
+introduced. See [method setup](AUTO_Z_OFFSET_PLAN.md) before enabling contacts.
 With two `probe_points`, AUTO_Z_OFFSET runs both supervised tests followed by
 calibration in one warm session. Separate test/calibration commands remain
 available. AUTO_Z_OFFSET includes full homing and mesh clear; the separate
 manual commands still require those preparation steps. Optional `[tjc_lcd]`
 uses a coordinate canvas to highlight each phase without full-screen redraws.
-It uses mainboard firmware with `TJC_CANVAS_VERSION=1` or the menu's existing
-`TJC_DRAW_VERSION=1`; drawing-only firmware reuses its generic executor
-without reflashing. No panel firmware update is needed. Drawing drains
-before measurement, and the calibration reserves the LCD against menus.
+It requires updated mainboard firmware with TJC_CANVAS_VERSION=1, but no panel
+firmware update. Drawing drains before measurement.
 
 ```ini
-[auto_z_offset]
+[auto_z_offset_cr]
 load_cell:
 #   Name from [load_cell name]. Reuses that sensor and its calibration.
 #probe_point:
-#   Legacy single physical bed XY point, measured with five pairs.
+#   Single physical bed XY point, measured with five pairs.
 #probe_points:
 #   Two distinct physical bed XY points, one pair of coordinates
 #   per line. Each is measured with three fresh CR Touch/nozzle pairs.
@@ -5757,14 +5760,6 @@ force_safety_limit:
 #   band. Compression headroom must exceed trigger_force. Saved sensor
 #   calibration and reference_tare_counts are unchanged. Generic
 #   load_cell_probe retains its saved-reference safety behavior.
-#sample_retract_dist: 2
-#   Existing nozzle tap retraction distance in mm. Also bounds nozzle
-#   overtravel below each fresh CR Touch bed_z reference. Each approach
-#   passes this derived endpoint and maximum travel to the contact engine.
-#   Endpoints at/below native position_min or at/above travel clearance are
-#   rejected before the nozzle approach; no global-minimum fallback.
-#   This bounds travel on a missing trigger, not physical force or accuracy.
-#   Legacy local DEV test_* options are ignored and no longer required.
 #horizontal_move_z: 5
 #   Travel clearance in mm; must exceed the current probe Z offset.
 #travel_speed: 50
@@ -5787,11 +5782,6 @@ force_safety_limit:
 #   Maximum wait in seconds; must exceed temperature_stable_time.
 #offset_tolerance: 0.025
 #   Maximum spread in mm among paired offsets at each individual point.
-#   Also bounds disagreement between descending and ascending contact-model
-#   estimates within each tap, including the primary ascent result. This
-#   experimental consistency criterion is not an absolute accuracy bound.
-#   Missing/invalid diagnostic references or unsupported branches reject
-#   the pair after acquisition, without changing its stopping mechanism.
 #spatial_tolerance: 0.025
 #   Maximum range in mm among local medians. Must be positive
 #   and no greater than 0.025. Exceeding it retains the diagnostic report
@@ -5847,6 +5837,39 @@ it does not identify saturation or excessive actual nozzle force by itself.
 Do not increase force limits to hide a failed contact. A fixed point reference
 prevents cumulative re-taring within the point from moving its safety bound;
 it does not certify equivalent physical force sensitivity over the bed.
+
+Both Auto Z-offset backends use the native configured Z minimum, clipped to
+kinematic limits, for pressure search. Maximum descent is start Z minus that
+minimum. `sample_retract_dist` controls CR tap withdrawal, not search travel;
+the saved probe offset is not used to select the endpoint. No-trigger or
+step-quantized endpoint results reject without a candidate. Mechanical limits
+and the configured MCU force/raw protections remain unchanged.
+
+### [auto_z_offset_ft]
+
+Use **Force Trigger (`force_trigger`)** through the
+`[auto_z_offset_ft]` section. Reference an existing named
+`load_cell`, keeps the CR Touch as the primary probe, and reports a provisional
+pressure-reference offset. Select only this backend or `[auto_z_offset_cr]`.
+The complete settings and selection examples are in
+[Auto_Z_Offset_Force_Trigger.md](Auto_Z_Offset_Force_Trigger.md) and
+`config/auto_z_offset_force_trigger.cfg`. Search uses the configured native Z
+minimum and is independent of `sample_retract_dist` or saved probe offset. The
+force and raw safety ceilings remain 75 g and 200 g. No firmware change is needed.
+
+`probe_points` is a multiline list of distinct physical bed XY
+pairs. Each point performs native CR Touch sampling and three pressure descents
+with its own local unloaded reference and the native mechanical search limit. Alternatively,
+`probe_point` selects the original single-point cycle; do not specify both.
+All nozzle and sensor destinations must fit native travel limits. Point offsets
+and their spatial range are reported separately without averaging or applying.
+
+`temperature_tolerance` is a positive finite margin in degrees C (default 3).
+Warm-up ends as soon as both heaters are within target +/- this margin,
+including the boundaries, without an additional PID-settling wait. The band is
+also enforced at measurement checkpoints. Out-of-band checkpoint readings,
+changed targets or invalid sensor readings reject the session. Native heater
+control and protections remain active.
 
 ### [load_cell_probe]
 Load Cell Probe. This combines the functionality of a [probe] and a [load_cell].

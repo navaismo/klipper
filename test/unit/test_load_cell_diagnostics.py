@@ -8,7 +8,7 @@ import random
 import unittest
 from unittest import mock
 
-from test_auto_z_offset import Config, Gcmd, Printer, ROOT, lcprobe
+from test_auto_z_offset_cr import Config, Gcmd, Printer, ROOT, lcprobe
 
 diag = lcprobe.load_cell_diagnostics
 
@@ -36,7 +36,7 @@ def curve(onset=0., release=0., stiffness=1000., drift=0., noise=0.,
         'position': [28., 28., .4], 'homing_origin': [0., 0., 0., 0.],
         'gcode_position': [28., 28., .4, 0.], 'mesh_active': False,
         'read_errors': []}
-    motion = {'name': 'auto_z_offset', 'tap_id': 1,
+    motion = {'name': 'auto_z_offset_cr', 'tap_id': 1,
         'collector_start_time': 100., 'trigger_time': 101., 'raw_z': -.1,
         'ascent_start_time': 101.2, 'ascent_end_time': 106.2,
         'ascent_sample_time': 5., 'sample_period': period,
@@ -284,7 +284,7 @@ class TraceTests(unittest.TestCase):
             self.assertAlmostEqual(result[0], original['contact_z'], places=9)
             samples = [[t, row[0], 0., 0.] for t, row in zip(
                 trace['sample_times'], trace['force_z'])]
-            motion = {'name': 'auto_z_offset', 'raw_z': trace['raw_z'],
+            motion = {'name': 'auto_z_offset_cr', 'raw_z': trace['raw_z'],
                 'ascent_start_time': trace['start_time'],
                 'ascent_end_time': samples[-1][0], 'ascent_sample_time': 5.}
             positions = dict((t, row[1]) for t, row in zip(
@@ -430,7 +430,7 @@ class IntegrationTests(unittest.TestCase):
         self.printer.toolhead.position = [28., 28., .4, 0.]
         move = lcprobe.LoadCellProbingMove.__new__(lcprobe.LoadCellProbingMove)
         move._printer, move._load_cell = self.printer, self.printer.cell
-        move._log_trace, move._name = enabled, 'auto_z_offset'
+        move._log_trace, move._name = enabled, 'auto_z_offset_cr'
         move._last_safety = motion['safety']
         move._pause_and_tare = mock.Mock()
         move._z_min_position = -3.

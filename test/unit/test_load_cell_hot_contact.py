@@ -8,7 +8,7 @@ import unittest
 
 import test_auto_z_offset_diagnostic as commands
 import test_load_cell_window_diagnostics as windows
-from test_auto_z_offset import ROOT, lcprobe, Printer
+from test_auto_z_offset_cr import ROOT, lcprobe, Printer
 from test_load_cell_contact import replay_module
 
 
