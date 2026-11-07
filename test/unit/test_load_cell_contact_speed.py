@@ -7,7 +7,7 @@ import types
 import unittest
 from unittest import mock
 
-import test_auto_z_offset as engine
+import test_auto_z_offset_cr as engine
 import configfile
 
 lcprobe = engine.lcprobe
@@ -98,11 +98,11 @@ class NativeContactTests(unittest.TestCase):
 
     def test_native_parameter_helper_preserves_independent_probe_speeds(self):
         parser = configparser.RawConfigParser()
-        parser.read_string('[auto_z_offset]\nspeed: 0.5\nlift_speed: 0.1\n'
+        parser.read_string('[auto_z_offset_cr]\nspeed: 0.5\nlift_speed: 0.1\n'
                            'sample_retract_dist: 0.5\n'
                            '[bltouch]\nspeed: 5\nlift_speed: 10\n')
         cfg = configfile.ConfigWrapper(self.printer, parser, {},
-                                       'auto_z_offset')
+                                       'auto_z_offset_cr')
         helper = lcprobe.LoadCellParameterHelper(cfg)
         self.assertEqual(helper.get_probe_params(engine.Gcmd())['probe_speed'],
                          .5)

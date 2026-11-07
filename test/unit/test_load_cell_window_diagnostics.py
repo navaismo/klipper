@@ -9,7 +9,7 @@ from unittest import mock
 
 import test_load_cell_contact as contacts
 import test_load_cell_diagnostics as diagnostics
-from test_auto_z_offset import auto, Gcmd, lcprobe, Printer, ROOT
+from test_auto_z_offset_cr import auto, Gcmd, lcprobe, Printer, ROOT
 
 diag = lcprobe.load_cell_diagnostics
 

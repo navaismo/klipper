@@ -7,7 +7,7 @@ import unittest
 from unittest import mock
 
 import test_auto_z_offset_diagnostic as commands
-from test_auto_z_offset import auto, Config, Gcmd, Printer
+from test_auto_z_offset_cr import auto, Config, Gcmd, Printer
 import configfile
 
 
@@ -29,20 +29,20 @@ class EstimatorSelectionTests(unittest.TestCase):
                                return_value=self.tap):
             with self.assertRaisesRegex(RuntimeError,
                                         'Invalid contact_estimator'):
-                auto.AutoZOffset(Config(self.printer,
+                auto.ContactRegressionAutoZOffset(Config(self.printer,
                     dict(self.config, contact_estimator='hybrid')))
-            module = auto.AutoZOffset(Config(Printer(),
+            module = auto.ContactRegressionAutoZOffset(Config(Printer(),
                 dict(self.config, contact_estimator='prtouch')))
             self.assertEqual(module.contact_estimator, 'prtouch')
 
     def test_option_uses_native_klipper_config_choice_api(self):
         def native_choice(config, option, choices, default=None):
             parser = configparser.ConfigParser()
-            parser.add_section('auto_z_offset')
+            parser.add_section('auto_z_offset_cr')
             if option in config.data:
-                parser.set('auto_z_offset', option, config.data[option])
+                parser.set('auto_z_offset_cr', option, config.data[option])
             wrapper = configfile.ConfigWrapper(
-                None, parser, {}, 'auto_z_offset')
+                None, parser, {}, 'auto_z_offset_cr')
             return wrapper.getchoice(option, choices, default)
         with mock.patch.object(Config, 'getchoice', native_choice):
             with mock.patch.object(auto.load_cell_probe, 'LoadCellTapHelper',
@@ -51,7 +51,8 @@ class EstimatorSelectionTests(unittest.TestCase):
                     data = dict(self.config)
                     if selection is not None:
                         data['contact_estimator'] = selection
-                    module = auto.AutoZOffset(Config(Printer(), data))
+                    module = auto.ContactRegressionAutoZOffset(
+                        Config(Printer(), data))
                     self.assertEqual(module.contact_estimator,
                                      selection or 'current')
 

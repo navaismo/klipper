@@ -1,4 +1,4 @@
-# Native CR Touch / load-cell pressure-reference calibration
+# Force Trigger calibration using CR Touch and an existing load cell
 # Copyright (C) 2026
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import json
@@ -7,15 +7,16 @@ import math
 from . import load_cell_probe, manual_probe, probe, trigger_analog
 
 
-class NativeAutoZOffset:
+class ForceTriggerAutoZOffset:
     def __init__(self, config):
         self.printer = config.get_printer()
         if any(config.has_section(s) for s in
-               ('auto_z_offset', 'load_cell_probe', 'prtouch')):
-            raise config.error('Select [auto_z_offset_native] OR the existing '
-                               'calibration backend, not both')
+               ('auto_z_offset_cr', 'load_cell_probe', 'prtouch')):
+            raise config.error('Select [auto_z_offset_cr] OR '
+                               '[auto_z_offset_ft], not both; do not add '
+                               '[load_cell_probe] or [prtouch]')
         if not config.has_section('bltouch'):
-            raise config.error('[auto_z_offset_native] requires [bltouch]')
+            raise config.error('[auto_z_offset_ft] requires [bltouch]')
         self.gcode = self.printer.lookup_object('gcode')
         self.reactor = self.printer.get_reactor()
         self.primary = self.printer.load_object(config, 'bltouch')
@@ -26,11 +27,11 @@ class NativeAutoZOffset:
                 raise config.error('Use probe_points or probe_point, not both')
             self.points = config.getlists('probe_points', seps=(',', '\n'),
                                           parser=float, count=2)
-            if (len(self.points) < 3
+            if (len(self.points) < 2
                     or len(set(tuple(p) for p in self.points))
                        != len(self.points)):
                 raise config.error(
-                    'probe_points requires at least three distinct points')
+                    'probe_points requires at least Two distinct points')
         else:
             self.points = [config.getfloatlist('probe_point', count=2)]
         self.clearance = config.getfloat('horizontal_move_z', 5., above=0.)
@@ -39,8 +40,9 @@ class NativeAutoZOffset:
         self.nozzle_temp = config.getfloat('nozzle_temp', 170., minval=170.)
         self.temp_tolerance = config.getfloat(
             'temperature_tolerance', 3., above=0.)
-        # Retain the current force/travel ceilings, not Marlin's ADC thresholds.
+        # Retain force ceilings; native mechanical limits bound search travel.
         force = config.getfloat('trigger_force', 75., minval=10., maxval=75.)
+        self.trigger_force = force
         limit = config.getfloat('force_safety_limit', 200., minval=100.,
                                 maxval=200., above=force)
         self.params = probe.ProbeParameterHelper(config)
@@ -51,9 +53,9 @@ class NativeAutoZOffset:
             force, limit, self.retract,
             self.params.speed, self.params.lift_speed,
             self.params.samples_tolerance]
-        if not all(self._finite(v) for v in values) or self.retract > .5:
-            raise config.error('Native calibration requires finite parameters '
-                               'and sample_retract_dist <= 0.5')
+        if not all(self._finite(v) for v in values):
+            raise config.error(
+                'Force Trigger calibration requires finite parameters')
         # Construct only native raw probing; no TappingMove or fitted result.
         sensor = self.cell.get_sensor()
         self.trigger = trigger_analog.MCU_trigger_analog(sensor)
@@ -77,7 +79,7 @@ class NativeAutoZOffset:
         for event in ('load_cell:calibrate', 'homing:home_rails_begin'):
             self.printer.register_event_handler(event, self._invalidate)
         self.gcode.register_command('AUTO_Z_OFFSET', self.cmd_AUTO_Z_OFFSET,
-            desc='Native pressure-reference calibration; report only')
+            desc='Force Trigger calibration; report only')
 
     @staticmethod
     def _finite(value):
@@ -101,17 +103,18 @@ class NativeAutoZOffset:
 
     def _idle(self):
         if not self.connected or self.printer.is_shutdown():
-            raise self.gcode.error('Native calibration is not connected')
+            raise self.gcode.error('Force Trigger calibration is not connected')
         stats = self.printer.lookup_object('print_stats', None)
         if stats and stats.get_status(self.reactor.monotonic())['state'] in (
                 'printing', 'paused'):
-            raise self.gcode.error('Native calibration requires an idle job')
+            raise self.gcode.error(
+                'Force Trigger calibration requires an idle job')
         pause = self.printer.lookup_object('pause_resume', None)
         sd = self.printer.lookup_object('virtual_sdcard', None)
         if ((pause and pause.is_paused)
                 or (sd and (sd.is_active() or sd.preflight_pending))):
             raise self.gcode.error(
-                'Native calibration excludes print preflight')
+                'Force Trigger calibration excludes print preflight')
         if not self.cell.is_calibrated():
             raise self.gcode.error('Load cell must already be calibrated')
 
@@ -131,13 +134,13 @@ class NativeAutoZOffset:
                     or measured <= 0. or measured < heater.min_temp
                     or measured > heater.max_temp):
                 raise self.gcode.error(
-                    'Native calibration heater state changed')
+                    'Force Trigger calibration heater state changed')
             if abs(measured - target) <= self.temp_tolerance:
                 continue
             in_band = False
             if check_band:
                 raise self.gcode.error(
-                    'Native calibration temperature out of range: '
+                    'Force Trigger calibration temperature out of range: '
                     '%s measured %.2f C, expected %.2f +/- %.2f C'
                     % (heater.get_name(), measured, target,
                        self.temp_tolerance))
@@ -148,17 +151,17 @@ class NativeAutoZOffset:
         # criterion differs from heater.check_busy(): both targets +/- margin.
         for heater, target in targets:
             self.heaters.set_temperature(heater, target, False)
-        gcmd.respond_info('Native Auto Z warming up; waiting for both heaters '
-                          'within +/- %.1f C' % self.temp_tolerance)
+        gcmd.respond_info('Force Trigger Auto Z warming up; waiting for both '
+                          'heaters within +/- %.1f C' % self.temp_tolerance)
         while not self._check_context(targets, calibration, check_band=False):
             self.reactor.pause(self.reactor.monotonic() + .25)
 
     def _lcd_warning(self, gcmd, action, exc):
-        logging.exception('Native Auto Z LCD %s failed', action)
+        logging.exception('Force Trigger Auto Z LCD %s failed', action)
         try:
             gcmd.respond_info('LCD calibration %s failed: %s' % (action, exc))
         except Exception:
-            logging.exception('Native Auto Z LCD warning failed')
+            logging.exception('Force Trigger Auto Z LCD warning failed')
 
     def _begin_lcd(self, gcmd, bed, nozzle):
         self._lcd = None
@@ -212,7 +215,7 @@ class NativeAutoZOffset:
         self._check_context(targets, calibration)
         start = self.toolhead.get_position()[2]
         if not self._finite(start) or start != self.clearance or floor >= start:
-            raise gcmd.error('Native pressure move has invalid start/bounds')
+            raise gcmd.error('Force Trigger move has invalid start/bounds')
         collector = None
         try:
             position, collector = self.press_move.probing_move(
@@ -220,15 +223,16 @@ class NativeAutoZOffset:
             stamp = self.trigger.get_last_trigger_time()
             if (not self._finite(position[2]) or not self._finite(stamp)
                     or stamp <= 0.):
-                raise gcmd.error('Native MCU pressure trigger unavailable')
+                raise gcmd.error('MCU force trigger unavailable')
             # Release only after native probing returned a successful trigger.
             self._move([None, None, self.clearance], self.params.lift_speed)
             end = self.toolhead.get_last_move_time()
             samples = load_cell_probe.check_sensor_errors(
                 collector.collect_until(end), self.printer)
             if not samples:
-                raise gcmd.error('Native pressure acquisition is empty')
-            logging.info('Native Auto Z pressure acquisition: %s', json.dumps({
+                raise gcmd.error('Force Trigger acquisition is empty')
+            logging.info('Force Trigger Auto Z pressure acquisition: %s',
+                         json.dumps({
                 'trigger_time': stamp, 'trigger_z': position[2],
                 'minimum_z': floor, 'samples': samples}))
             self._check_context(targets, calibration)
@@ -245,17 +249,18 @@ class NativeAutoZOffset:
             raise self.gcode.error('Probe offsets must be finite')
         if not status['axis_minimum'][2] < self.clearance \
                 <= status['axis_maximum'][2]:
-            raise self.gcode.error('Native calibration clearance out of range')
+            raise self.gcode.error(
+                'Force Trigger calibration clearance out of range')
         for index, point in enumerate(self.points):
             for xy in (point, [point[i]-offsets[i] for i in (0, 1)]):
                 if any(not status['axis_minimum'][i] <= xy[i]
                            <= status['axis_maximum'][i] for i in (0, 1)):
                     raise self.gcode.error(
-                        'Native calibration point %d out of range'
+                        'Force Trigger calibration point %d out of range'
                         % (index+1,))
 
     def _measure_point(self, gcmd, point, point_index, targets, calibration):
-        gcmd.respond_info('Native measuring P%d at X%.3f Y%.3f'
+        gcmd.respond_info('Force Trigger measuring P%d at X%.3f Y%.3f'
                           % (point_index, point[0], point[1]))
         x, y = point
         ox, oy, oz = calibration[0]
@@ -276,14 +281,9 @@ class NativeAutoZOffset:
         finally:
             session.end_probe_session()
         if not all(self._finite(v) for v in cr):
-            raise gcmd.error('Invalid native CR Touch result')
-        # Use uncorrected trigger coordinates, never mesh/twist bed_z.
-        floor = cr.test_z - oz - self.retract
-        minimum = self.toolhead.get_status(self.reactor.monotonic())[
-            'axis_minimum'][2]
-        if (not self._finite(floor) or floor <= minimum
-                or floor >= self.clearance):
-            raise gcmd.error('Paired pressure bound outside native Z range')
+            raise gcmd.error('Invalid CR Touch result')
+        # Search bounds belong to native motion, not the previous probe offset.
+        floor = self.press_move.get_probe_bounds(self.clearance)[0]
         self._move([None, None, self.clearance], self.params.lift_speed)
         self._move([x, y, self.clearance], self.travel_speed)
         self._check_context(targets, calibration)
@@ -294,7 +294,7 @@ class NativeAutoZOffset:
         reference = self.cell.avg_counts()
         self._check_context(targets, calibration)
         self.press_move.set_safety_reference(reference)
-        logging.info('Native Auto Z unloaded reference: %s', json.dumps({
+        logging.info('Force Trigger Auto Z unloaded reference: %s', json.dumps({
             'point': list(point),
             'position': self.toolhead.get_position()[:3],
             'safety_reference_counts': int(reference),
@@ -307,7 +307,8 @@ class NativeAutoZOffset:
                              % (point_index, index+1))
             presses.append(self._press(
                 press_cmd, floor, targets, calibration))
-            gcmd.respond_info('Native P%d PROBE BY PRESS %d: z=%.6f'
+            gcmd.respond_info('Force Trigger P%d sample %d: '
+                              'Triggered Z: %.6f mm'
                               % (point_index, index+1, presses[-1]['z']))
         self._update_lcd(gcmd, 'computing',
                          'P%d computing offset' % point_index)
@@ -315,10 +316,11 @@ class NativeAutoZOffset:
         zs = sorted(p['z'] for p in presses)
         if zs[-1]-zs[0] > self.params.samples_tolerance:
             raise gcmd.error(
-                'Native pressure samples exceed samples_tolerance')
+                'Force Trigger samples exceed samples_tolerance')
         pressure_z = zs[1]
         value = cr.test_z - pressure_z
-        report = {'backend': 'native', 'point': list(point),
+        report = {'backend': 'force_trigger', 'method': 'Force Trigger',
+            'point': list(point),
             'point_index': point_index,
             'cr_test_z': cr.test_z, 'cr_bed_z': cr.bed_z,
             'raw_bed_reference_z': cr.test_z-oz, 'minimum_z': floor,
@@ -328,23 +330,26 @@ class NativeAutoZOffset:
             'reference_kind': 'mcu_force_trigger_not_zero_force_contact',
             'applied_adjustment_mm': 0., 'eligible_for_application': False,
             'saved': False}
-        logging.info('Native Auto Z point result: %s', json.dumps(report))
-        gcmd.respond_info('Native P%d PROBE BY TOUCH: test_z=%.6f; '
-            'PRESS median_z=%.6f; provisional z_offset=%.6f mm. '
-            'Force-trigger reference, not zero-force contact; '
+        logging.info('Force Trigger Auto Z point result: %s',
+                     json.dumps(report))
+        gcmd.respond_info('Force Trigger P%d: CR Touch test_z=%.6f mm; '
+            'Triggered Z: %.6f mm; Provisional Z-offset: %.6f mm. '
+            'Loaded force reference, not first physical contact; '
             'no apply or save.'
             % (point_index, cr.test_z, pressure_z, value))
         return report
 
     def cmd_AUTO_Z_OFFSET(self, gcmd):
         if self.busy:
-            raise gcmd.error('Native calibration already running')
+            raise gcmd.error('Force Trigger calibration already running')
         self.result = self.error = None
         extra = set(gcmd.get_command_parameters()) - {'BED_TEMP', 'NOZZLE_TEMP'}
         if extra:
-            raise gcmd.error('Unsupported native calibration parameters: %s'
+            raise gcmd.error('Unsupported Force Trigger parameters: %s'
                              % (', '.join(sorted(extra)),))
         self._idle()
+        gcmd.respond_info('Auto Z-offset method: Force Trigger\n'
+                          'Force threshold: %g g' % self.trigger_force)
         manual_probe.verify_no_manual_probe(self.printer)
         bed = gcmd.get_float('BED_TEMP', self.bed_temp, minval=50.)
         nozzle = gcmd.get_float('NOZZLE_TEMP', self.nozzle_temp, minval=170.)
@@ -382,10 +387,11 @@ class NativeAutoZOffset:
             self.result = dict(reports[0])
             self.result.update({'points': reports, 'reference_point': 1,
                                 'spatial_range': max(offsets)-min(offsets)})
-            logging.info('Native Auto Z result: %s', json.dumps(self.result))
+            logging.info('Force Trigger Auto Z result: %s',
+                         json.dumps(self.result))
             if len(reports) > 1:
-                gcmd.respond_info('Native %d-point pressure-reference report: '
-                    'P1 provisional z_offset=%.6f mm; spatial range=%.6f mm. '
+                gcmd.respond_info('Force Trigger %d-point report: '
+                    'P1 Provisional Z-offset: %.6f mm; spatial range=%.6f mm. '
                     'No spatial averaging, no apply or save.'
                     % (len(reports), offsets[0], max(offsets)-min(offsets)))
         except Exception as exc:
@@ -398,8 +404,8 @@ class NativeAutoZOffset:
                         try:
                             self.heaters.set_temperature(heater, old, False)
                         except Exception:
-                            logging.exception('Native calibration heater '
-                                              'cleanup failed')
+                            logging.exception('Force Trigger calibration '
+                                              'heater cleanup failed')
             raise
         finally:
             self.press_move.clear_safety_reference()
@@ -407,9 +413,10 @@ class NativeAutoZOffset:
             self._end_lcd(gcmd)
 
     def get_status(self, eventtime):
-        return {'backend': 'native', 'busy': self.busy, 'result': self.result,
+        return {'backend': 'force_trigger', 'method': 'Force Trigger',
+                'busy': self.busy, 'result': self.result,
                 'error': self.error, 'eligible_for_application': False}
 
 
 def load_config(config):
-    return NativeAutoZOffset(config)
+    return ForceTriggerAutoZOffset(config)

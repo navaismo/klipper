@@ -19,7 +19,7 @@ package.__path__ = [os.path.join(ROOT, 'klippy', 'extras')]
 fake_mcu = types.ModuleType('mcu')
 fake_mcu.MCU_trsync = types.SimpleNamespace(REASON_COMMS_TIMEOUT=10)
 with mock.patch.dict(sys.modules, {PACKAGE: package, 'mcu': fake_mcu}):
-    auto = importlib.import_module(PACKAGE + '.auto_z_offset')
+    auto = importlib.import_module(PACKAGE + '.auto_z_offset_cr')
     bedmesh = importlib.import_module(PACKAGE + '.bed_mesh')
     homing = importlib.import_module(PACKAGE + '.homing')
 lcprobe = auto.load_cell_probe
@@ -37,7 +37,7 @@ class Config:
     def get_printer(self):
         return self.printer
     def get_name(self):
-        return 'auto_z_offset'
+        return 'auto_z_offset_cr'
     def has_section(self, name):
         return name in ('bltouch', 'stepper_z')
     def getsection(self, name):
@@ -246,10 +246,9 @@ class Printer:
     def script(self, script):
         self.trace.append(('gcode', script))
         if script == 'G28':
-            state = types.SimpleNamespace(get_axes=lambda: [0, 1, 2])
-            self.send_event('homing:home_rails_begin', state, [])
+            for callback in self.events.get('homing:home_rails_begin', []):
+                callback(None, None)
             self.toolhead.homed = 'xyz'
-            self.send_event('homing:home_axes', state)
         elif script == 'BED_MESH_CLEAR':
             mesh = self.objects.get('bed_mesh')
             if mesh is not None:
@@ -267,8 +266,6 @@ class Printer:
         return self.objects[name]
     def register_event_handler(self, name, callback):
         self.events.setdefault(name, []).append(callback)
-    def send_event(self, name, *args):
-        return [callback(*args) for callback in self.events.get(name, [])]
     def is_shutdown(self):
         return self.shutdown
     def add_object(self, name, value):
@@ -281,6 +278,7 @@ class WorkflowTests(unittest.TestCase):
     def setUp(self):
         self.printer = Printer()
         self.tap = mock.Mock()
+        self.tap.probing_move.get_probe_bounds.return_value = (-3., 8.)
         self.tap.param_helper.get_probe_params.return_value = {
             'load_cell_retract_dist': .5}
         self.tap.tapping_move.run_tap.side_effect = self.contact
@@ -291,43 +289,17 @@ class WorkflowTests(unittest.TestCase):
                                        return_value=self.tap)
         self.factory = self.patch.start()
         self.addCleanup(self.patch.stop)
-        # Workflow fixtures supply already-supported contact coordinates;
-        # real-signal confidence is covered by the recorded-trace tests.
-        onset_patch = mock.patch.object(auto.load_cell_contact_onset,
-            'estimate', side_effect=lambda report: {'status': 'identified',
-                'z': report['descent']['z'], 'reasons': []})
-        onset_patch.start()
-        self.addCleanup(onset_patch.stop)
-        self.module = auto.AutoZOffset(Config(
+        self.module = auto.ContactRegressionAutoZOffset(Config(
             self.printer, getattr(self, 'config_data', None)))
         self.module._connect()
-    def contact(self, gcmd, minimum_z=None, maximum_descent=None,
-                onset_stop=None):
-        floor = self.printer.primary.height-self.printer.primary.offsets[2]-.5
-        ref = self.module._approach_reference
-        if ref is not None:
-            floor = (ref['nozzle_contact_z'] + self.printer.primary.height
-                     - ref['cr_test_z'] - .5)
-        self.assertAlmostEqual(minimum_z, floor)
-        self.assertAlmostEqual(maximum_descent, self.module.clearance-floor)
+    def contact(self, gcmd, minimum_z=None, maximum_descent=None):
         self.printer.trace.append(('tap',
             self.printer.toolhead.get_position()))
         self.printer.toolhead.position[2] = 0.1
         if self.contact_action is not None:
             self.contact_action()
-        z = next(self.nozzle_heights)
-        # Workflow mocks represent an internally consistent acquired contact.
-        # Rejection and real-trace tests independently exercise qualification.
-        self.tap.tapping_move.get_contact_diagnostics.return_value = {
-            'quality': {'references_complete': True,
-                'frame_state': 'consistent', 'valid_time_bounds': True,
-                'bad_timestamps': 0, 'invalid_samples': 0,
-                'expired_history_samples': 0, 'lookup_errors': 0},
-            'motion': {'sensor_errors': 0}, 'estimates_comparable': True,
-            'descent': {'status': 'identified', 'z': z},
-            'ascent': {'status': 'identified', 'z': z},
-            'descent_threshold': {'status': 'identified'}}
-        return (self.printer.toolhead.get_position()[:2] + [z], True)
+        return (self.printer.toolhead.get_position()[:2]
+                + [next(self.nozzle_heights)], True)
     def calibrate(self):
         self.module.verified_points = dict.fromkeys(
             range(len(self.module.points)), self.module._fingerprint())
@@ -335,6 +307,22 @@ class WorkflowTests(unittest.TestCase):
         self.module.cmd_CALIBRATE(Gcmd())
     def assert_no_motion_or_heat(self):
         self.assertEqual(self.printer.trace, [])
+    def test_regression_name_reports_fit_without_applying_or_staging(self):
+        cmd = Gcmd()
+        self.module.cmd_TEST_CONTACT(cmd)
+        text = '\n'.join(c.args[0]
+                         for c in cmd.respond_info.call_args_list)
+        self.assertIn('Auto Z-offset method: Contact Regression', text)
+        self.assertIn('Contact estimated Z: 0.100000 mm', text)
+        self.assertEqual(self.module.get_status(0.)['backend'], 'regression')
+        self.assertEqual(self.module.last_contact['method'],
+                         'Contact Regression')
+        self.calibrate()
+        self.assertEqual(self.module.result['backend'], 'regression')
+        self.assertEqual(self.module.result['method'], 'Contact Regression')
+        self.assertEqual(self.printer.primary.offsets[2], 1.065)
+        self.printer.objects['configfile'].set.assert_not_called()
+
     def test_constructor_reuses_primary_and_single_cell(self):
         self.factory.assert_called_once()
         self.assertIs(self.factory.call_args.args[1], self.printer.cell)
@@ -343,8 +331,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIs(self.printer.objects['probe'], self.printer.primary)
         self.assertEqual(set(self.printer.gcode.commands), {
             'AUTO_Z_OFFSET_CALIBRATE', 'AUTO_Z_OFFSET_TEST_CONTACT',
-            'AUTO_Z_OFFSET_ACCEPT', 'AUTO_Z_OFFSET',
-            'AUTO_Z_OFFSET_APPLY', 'AUTO_Z_OFFSET_ROLLBACK'})
+            'AUTO_Z_OFFSET_ACCEPT', 'AUTO_Z_OFFSET'})
         self.assert_no_motion_or_heat()
     def test_five_pairs_same_physical_point_and_sign(self):
         self.calibrate()
@@ -372,46 +359,10 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.module.state, 'accepted')
         with self.assertRaisesRegex(RuntimeError, 'No validated'):
             self.module.cmd_ACCEPT(Gcmd())
-    def test_calibration_does_not_require_manual_contact_tests(self):
-        self.assertFalse(self.module.contact_verified)
-        self.module.cmd_CALIBRATE(Gcmd())
-        self.assertEqual(self.module.state, 'candidate')
-        self.assertEqual(self.tap.tapping_move.run_tap.call_count, 5)
-    def test_z_probe_home_invalidates_candidate_preserving_offset(self):
-        self.calibrate()
-        self.assertIsNotNone(self.module.candidate)
-        before = self.printer.primary.offsets
-        pending = {name: dict(values)
-                   for name, values in self.printer.pending.items()}
-        home = homing.Homing(self.printer)
-        home.set_axes([2])
-        home._set_start_position = mock.Mock()
-        home._probing_home = mock.Mock()
-        rail = mock.Mock()
-        rail.get_endstops.return_value = [(
-            types.SimpleNamespace(get_position_endstop=lambda: before[2]), 'z')]
-        rail.get_homing_info.return_value = types.SimpleNamespace(
-            speed=5., retract_dist=0.)
-        home.home_rails([rail], [None, None, 5.], [None, None, 0.])
-        self.assertIsNone(self.module.candidate)
-        self.assertIsNone(self.module.result)
-        self.assertFalse(self.module.contact_verified)
-        self.assertEqual(self.module.verified_points, {})
-        self.assertEqual(self.printer.primary.offsets, before)
-        self.assertEqual(self.printer.pending, pending)
-        with self.assertRaisesRegex(RuntimeError, 'No validated'):
-            self.module.cmd_ACCEPT(Gcmd())
-    def test_completed_home_requires_fresh_calibration_before_acceptance(self):
-        self.module.cmd_TEST_CONTACT(Gcmd())
-        self.assertTrue(self.module.contact_verified)
-        self.printer.send_event('homing:home_axes',
-            types.SimpleNamespace(get_axes=lambda: [2]))
-        self.assertFalse(self.module.contact_verified)
-        with self.assertRaisesRegex(RuntimeError, 'No validated'):
-            self.module.cmd_ACCEPT(Gcmd())
-        self.module.cmd_CALIBRATE(Gcmd())
-        self.assertEqual(self.module.state, 'candidate')
-        self.assertEqual(self.tap.tapping_move.run_tap.call_count, 6)
+    def test_requires_supervised_contact(self):
+        with self.assertRaisesRegex(RuntimeError, 'TEST_CONTACT'):
+            self.module.cmd_CALIBRATE(Gcmd())
+        self.assert_no_motion_or_heat()
     def test_supervised_test_uses_same_engine_without_candidate(self):
         self.module.cmd_TEST_CONTACT(Gcmd())
         self.assertTrue(self.module.contact_verified)
@@ -562,7 +513,8 @@ class WorkflowTests(unittest.TestCase):
         self.assert_no_motion_or_heat()
     def test_configured_bed_at_50_reaches_contact_without_waiting_for_60(self):
         self.printer = Printer()
-        self.module = auto.AutoZOffset(Config(self.printer, {'bed_temp': 50.}))
+        self.module = auto.ContactRegressionAutoZOffset(
+            Config(self.printer, {'bed_temp': 50.}))
         self.module._connect()
         self.module.cmd_TEST_CONTACT(Gcmd())
         self.assertEqual(self.module.state, 'contact_ready')
@@ -577,7 +529,8 @@ class WorkflowTests(unittest.TestCase):
                          {'measured': 50., 'target': 50.})
         self.assertEqual(self.module.bed_temp, 50.)
         with self.assertRaisesRegex(RuntimeError, 'bed_temp'):
-            auto.AutoZOffset(Config(self.printer, {'bed_temp': 49.}))
+            auto.ContactRegressionAutoZOffset(
+                Config(self.printer, {'bed_temp': 49.}))
 
     def test_heating_timeout_prevents_motion_and_restores_targets(self):
         self.printer.bed.autoheat = False
@@ -860,12 +813,15 @@ class MultiPointWorkflowTests(unittest.TestCase):
         self.assertEqual(self.module.state, 'idle')
         self.assertIsNone(self.module.result)
 
-    def test_optional_supervised_contact_tracks_each_location(self):
+    def test_supervised_contact_is_required_at_each_location(self):
         for point in range(1, 5):
             self.module.cmd_TEST_CONTACT(Gcmd(params={'POINT': point}))
             self.assertEqual(self.module.get_status(0.)['verified_points'],
                              list(range(1, point+1)))
             self.assertEqual(self.module.contact_verified, point == 4)
+            if point < 4:
+                with self.assertRaisesRegex(RuntimeError, 'every configured'):
+                    self.module.cmd_CALIBRATE(Gcmd())
         self.assertEqual(self.tap.tapping_move.run_tap.call_count, 4)
         self.module.cmd_CALIBRATE(Gcmd())
         self.assertEqual(self.tap.tapping_move.run_tap.call_count, 16)
@@ -901,15 +857,13 @@ class MultiPointWorkflowTests(unittest.TestCase):
         self.assertIsNone(self.module.candidate)
         self.printer.objects['configfile'].set.assert_not_called()
 
-    def test_sensor_changes_discard_previously_tested_point_references(self):
+    def test_sensor_changes_require_requalifying_previously_tested_points(self):
         self.module.cmd_TEST_CONTACT(Gcmd(params={'POINT': 1}))
         self.printer.cell.counts_per_gram += 1.
         self.module.cmd_TEST_CONTACT(Gcmd(params={'POINT': 2}))
         self.assertEqual(self.module.get_status(0.)['verified_points'], [2])
-        self.module.cmd_CALIBRATE(Gcmd())
-        self.assertEqual(self.module.state, 'candidate')
-        self.assertEqual(self.tap.tapping_move.run_tap.call_count,
-                         2+len(self.module.points)*3)
+        with self.assertRaisesRegex(RuntimeError, 'every configured'):
+            self.module.cmd_CALIBRATE(Gcmd())
 
     def test_homing_invalidates_all_location_qualifications(self):
         self.module.cmd_TEST_CONTACT(Gcmd(params={'POINT': 1}))
@@ -929,17 +883,18 @@ class MultiPointWorkflowTests(unittest.TestCase):
         for data in invalid:
             with self.subTest(data=data):
                 with self.assertRaises(RuntimeError):
-                    auto.AutoZOffset(Config(self.printer, data))
+                    auto.ContactRegressionAutoZOffset(
+                        Config(self.printer, data))
         self.assert_no_motion_or_heat()
 
     def test_real_config_parser_reads_multiline_physical_points(self):
         configfile = importlib.import_module('configfile')
         parser = configfile.configparser.RawConfigParser()
-        parser.read_string('[auto_z_offset]\nprobe_points:\n'
+        parser.read_string('[auto_z_offset_cr]\nprobe_points:\n'
                            '    28, 28\n    110, 110\n'
                            '    180, 28\n    28, 180\n')
         cfg = configfile.ConfigWrapper(self.printer, parser, {},
-                                        'auto_z_offset')
+                                        'auto_z_offset_cr')
         self.assertEqual(cfg.getlists('probe_points', seps=(',', '\n'),
                                        parser=float, count=2),
                          tuple(tuple(p) for p in self.module.points))
@@ -962,9 +917,9 @@ class TwoPointWorkflowTests(unittest.TestCase):
     assert_no_motion_or_heat = WorkflowTests.assert_no_motion_or_heat
     test_local_spread_rejects_without_hiding_pairs = (
         MultiPointWorkflowTests.test_local_spread_rejects_without_hiding_pairs)
-    test_sensor_changes_discard_previously_tested_point_references = (
+    test_sensor_changes_require_requalifying_previously_tested_points = (
         MultiPointWorkflowTests
-        .test_sensor_changes_discard_previously_tested_point_references)
+        .test_sensor_changes_require_requalifying_previously_tested_points)
     test_homing_invalidates_all_location_qualifications = (
         MultiPointWorkflowTests
         .test_homing_invalidates_all_location_qualifications)
@@ -1020,12 +975,15 @@ class TwoPointWorkflowTests(unittest.TestCase):
         self.printer.objects['configfile'].set.assert_not_called()
         self.assertEqual(self.printer.primary.offsets[2], 1.065)
 
-    def test_both_locations_are_measured_without_manual_qualification(self):
-        self.assertFalse(self.module.contact_verified)
+    def test_both_locations_require_supervised_contact(self):
+        self.module.cmd_TEST_CONTACT(Gcmd(params={'POINT': 1}))
+        with self.assertRaisesRegex(RuntimeError, 'every configured'):
+            self.module.cmd_CALIBRATE(Gcmd())
+        self.module.cmd_TEST_CONTACT(Gcmd(params={'POINT': 2}))
+        self.assertEqual(self.module.get_status(0.)['verified_points'], [1, 2])
+        self.assertTrue(self.module.contact_verified)
         self.module.cmd_CALIBRATE(Gcmd())
-        self.assertEqual(self.module.state, 'candidate')
-        self.assertEqual(len(self.module.result['points']), 2)
-        self.assertEqual(self.tap.tapping_move.run_tap.call_count, 6)
+        self.assertEqual(self.tap.tapping_move.run_tap.call_count, 8)
 
     def test_invalid_third_point_is_rejected_before_heat_or_motion(self):
         with self.assertRaisesRegex(RuntimeError, 'POINT'):
@@ -1067,7 +1025,7 @@ class TwoPointWorkflowTests(unittest.TestCase):
                        [[28., 28.], [float('nan'), 110.]]):
             with self.subTest(points=points):
                 with self.assertRaises(RuntimeError):
-                    auto.AutoZOffset(Config(self.printer, {
+                    auto.ContactRegressionAutoZOffset(Config(self.printer, {
                         'probe_point': None, 'probe_points': points}))
         self.assert_no_motion_or_heat()
 
@@ -1126,9 +1084,9 @@ class AutomaticWorkflowTests(unittest.TestCase):
         offsets = [1.46, 1.49] + [1.46] * 3 + [1.49] * 3
         self.nozzle_heights = iter(self.printer.primary.height-v
                                    for v in offsets)
-        self.run_automatic()
+        with self.assertRaisesRegex(RuntimeError, 'Spatial range'):
+            self.run_automatic()
         self.assertEqual(self.module.state, 'rejected')
-        self.assertIn('Spatial range', self.module.error)
         self.assertEqual(len(self.module.result['points']), 2)
         self.assertIsNone(self.module.result['z_offset'])
         self.printer.objects['configfile'].set.assert_not_called()
@@ -1288,7 +1246,7 @@ class EngineTests(unittest.TestCase):
         move = lcprobe.LoadCellProbingMove.__new__(lcprobe.LoadCellProbingMove)
         move._printer = self.printer
         move._load_cell = self.printer.cell
-        move._name = 'auto_z_offset'
+        move._name = 'auto_z_offset_cr'
         move._log_trace = True
         move._last_safety = None
         move._safety_reference_counts = None
@@ -1416,9 +1374,8 @@ class EngineTests(unittest.TestCase):
         with self.assertLogs(level='INFO') as logs:
             with self.assertRaisesRegex(RuntimeError, 'RAW_RANGE'):
                 move.probing_move(Gcmd())
-        entry = next(line for line in logs.output
-                     if 'Load cell probe failure: ' in line)
-        report = lcprobe.json.loads(entry.split('Load cell probe failure: ')[1])
+        report = lcprobe.json.loads(
+            logs.output[0].split('Load cell probe failure: ')[1])
         self.assertEqual(report['observed_raw_min'], -23000)
         self.assertEqual(report['observed_raw_max'], 6999)
         self.assertEqual(report['sample_count'], 6000)
@@ -1652,7 +1609,6 @@ class EngineTests(unittest.TestCase):
         sensor_factory.assert_called_once()
         cell_factory.assert_called_once()
         self.assertIs(self.printer.objects['probe'], primary)
-        self.assertTrue(primary._probe_session.nozzle_probe)
         self.printer.objects['pins'].register_chip.assert_called_once()
         self.assertIn('PROBE', self.printer.gcode.commands)
         self.assertIn('LOAD_CELL_TEST_TAP', self.printer.gcode.commands)
@@ -1703,6 +1659,54 @@ class EngineTests(unittest.TestCase):
         payload = lcprobe.TapAnalysis([(1., 2., 3.), (4., 5., 6.)]).to_dict()
         self.assertEqual(payload, {'time': [1., 4.], 'force': [2., 5.],
                                    'is_valid': True})
+
+
+class RestoredBoundsTests(unittest.TestCase):
+    setUp = WorkflowTests.setUp
+    contact = WorkflowTests.contact
+
+    def test_original_tap_receives_existing_finite_endpoint(self):
+        self.module.cmd_TEST_CONTACT(Gcmd())
+        call = self.tap.tapping_move.run_tap.call_args
+        self.assertAlmostEqual(call.kwargs['minimum_z'], -3.)
+        self.assertAlmostEqual(call.kwargs['maximum_descent'], 8.)
+        self.assertEqual(self.printer.primary.offsets[2], 1.065)
+        self.printer.objects['configfile'].set.assert_not_called()
+
+    def test_invalid_native_bounds_reject_before_nozzle_descent(self):
+        self.tap.probing_move.get_probe_bounds.side_effect = RuntimeError(
+            'Invalid native Z search bounds')
+        with self.assertRaisesRegex(RuntimeError, 'Invalid native Z'):
+            self.module.cmd_TEST_CONTACT(Gcmd())
+        self.tap.tapping_move.run_tap.assert_not_called()
+        self.assertIsNone(self.module.candidate)
+        self.printer.objects['configfile'].set.assert_not_called()
+
+    def test_missing_force_trigger_cannot_retry_or_create_candidate(self):
+        self.tap.tapping_move.run_tap.side_effect = RuntimeError(
+            'No trigger on probe after full movement')
+        with self.assertRaisesRegex(RuntimeError, 'No trigger'):
+            self.module.cmd_TEST_CONTACT(Gcmd())
+        self.tap.tapping_move.run_tap.assert_called_once()
+        self.assertIsNone(self.module.candidate)
+        self.assertIsNone(self.module.result)
+        self.printer.objects['configfile'].set.assert_not_called()
+
+    def test_current_sample_uses_original_configuration_interface(self):
+        import configparser
+        cfg = configparser.ConfigParser()
+        cfg.read(os.path.join(ROOT, 'config',
+                              'sample-auto-z-offset-current.cfg'))
+        values = dict(cfg.items('auto_z_offset_cr'))
+        self.assertNotIn('contact_estimator', values)
+        self.assertFalse(any(key.startswith('test_') for key in values))
+        values['probe_point'] = None
+        self.config_data = values
+        WorkflowTests.setUp(self)
+        self.module.cmd_AUTO_Z_OFFSET(Gcmd())
+        self.assertEqual(self.module.state, 'candidate')
+        self.assertEqual(self.tap.tapping_move.run_tap.call_count, 8)
+        self.printer.objects['configfile'].set.assert_not_called()
 
 
 if __name__ == '__main__':

@@ -67,10 +67,13 @@ class DiagnosticManager:
         planned, estimated, empty = toolhead.check_busy(now)
         if not empty or planned > estimated:
             raise self.printer.command_error('Diagnostic requires no motion')
-        auto = self.printer.lookup_object('auto_z_offset', None)
-        if (auto is not None and auto.get_status(now).get('state')
-                in ('heating', 'measuring')):
-            raise self.printer.command_error('Auto Z-offset is busy')
+        for name in ('auto_z_offset_cr', 'auto_z_offset_ft'):
+            auto = self.printer.lookup_object(name, None)
+            if auto is not None:
+                status = auto.get_status(now)
+                if (status.get('busy') or status.get('state')
+                        in ('heating', 'measuring')):
+                    raise self.printer.command_error('Auto Z-offset is busy')
         return planned, tuple(toolhead.get_position())
 
     def start(self, cell, gcmd):

@@ -11,7 +11,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 # The existing offline harness supplies printer/MCU mocks for LCBestFit.
 sys.path.insert(0, os.path.join(ROOT, 'test', 'unit'))
-from test_auto_z_offset import auto, lcprobe, Printer
+from test_auto_z_offset_cr import auto, lcprobe, Printer
 
 
 def replay(record, tolerance=.025):
@@ -62,7 +62,7 @@ def source_hashes():
     hashes = {}
     for path in ('klippy/extras/load_cell_contact.py',
                  'klippy/extras/load_cell_contact_onset.py',
-                 'klippy/extras/auto_z_offset.py',
+                 'klippy/extras/auto_z_offset_cr.py',
                  'klippy/extras/load_cell_probe.py',
                  'klippy/extras/load_cell_diagnostics.py'):
         with open(os.path.join(ROOT, path), 'rb') as source:

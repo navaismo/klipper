@@ -124,7 +124,7 @@ nav:
     - Code_Overview.md
     - LCD_STATUS_PLAN.md
     - AUTO_Z_OFFSET_PLAN.md
-    - Auto_Z_Offset_Native.md
+    - Auto_Z_Offset_Force_Trigger.md
     - Kinematics.md
     - Protocol.md
     - API_Server.md

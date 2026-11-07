@@ -328,6 +328,38 @@ class LoadCellProbingMove:
         self._diagnostic_sequence = 0
         self._diagnostic_motion = None
 
+    def get_probe_bounds(self, start_z):
+        toolhead = self._printer.lookup_object('toolhead')
+        status = toolhead.get_status(self._printer.get_reactor().monotonic())
+        low, high = status['axis_minimum'][2], status['axis_maximum'][2]
+        if (any(math.isnan(v) or math.isinf(v) for v in
+                (start_z, low, high, self._z_min_position))
+                or 'z' not in status['homed_axes']):
+            raise self._printer.command_error('Invalid native Z search bounds')
+        # Reuse native probing's configured minimum, clipped to kinematics.
+        # Retraction distance and the saved probe offset do not select travel.
+        target_z = max(low, self._z_min_position)
+        if not target_z < start_z <= high:
+            raise self._printer.command_error('Native Z bound prevents descent')
+        return target_z, start_z - target_z
+
+    def _at_probe_endpoint(self, position, target):
+        steppers = self._mcu_trigger_analog.get_steppers()
+        if not steppers:
+            raise self._printer.command_error('No load cell Z steppers')
+        # The target may lie between steps. A result within one native step
+        # cannot distinguish contact from exhausted travel at that endpoint.
+        at_endpoint = True
+        for stepper in steppers:
+            step = stepper.get_step_dist()
+            distance = (stepper.calc_position_from_coord(position)
+                        - stepper.calc_position_from_coord(target))
+            if ((math.isnan(step) or math.isinf(step)) or step <= 0.
+                    or (math.isnan(distance) or math.isinf(distance))):
+                raise self._printer.command_error('Invalid Z step resolution')
+            at_endpoint &= abs(distance) <= step
+        return at_endpoint
+
     def set_safety_reference(self, reference_counts):
         # A caller may anchor a point after retracting into unloaded clearance.
         if math.isnan(reference_counts) or math.isinf(reference_counts):
@@ -471,6 +503,7 @@ class LoadCellProbingMove:
             if target_z >= pos[2]:
                 raise self._printer.command_error(
                     "Contact bound prevents descent")
+        start_z = pos[2]
         pos[2] = target_z
         # Validate the endpoint before tare or MCU arming.
         self._pause_and_tare(gcmd)
@@ -489,6 +522,8 @@ class LoadCellProbingMove:
                     'collector_start_time': load_cell_diagnostics.number(
                         collector.min_time),
                     'target': list(pos[:3]), 'speed': speed,
+                    'starting_z': start_z,
+                    'maximum_descent': start_z - target_z,
                     'sample_period': 1. / sensor.get_samples_per_second(),
                     'safety': self._last_safety,
                     'frames': {'before_probe': load_cell_diagnostics.snapshot(
@@ -499,6 +534,14 @@ class LoadCellProbingMove:
         # do homing move
         try:
             epos = phoming.probing_move(self._mcu_trigger_analog, pos, speed)
+            if self._at_probe_endpoint(epos, pos):
+                motion = getattr(self, '_diagnostic_motion', None)
+                if self._log_trace and isinstance(motion, dict):
+                    motion.update({'trigger_time':
+                        self._mcu_trigger_analog.get_last_trigger_time(),
+                        'raw_z': epos[2], 'rejected_at_endpoint': True})
+                raise self._printer.command_error(
+                    'Load cell trigger at travel endpoint; no valid contact')
         except Exception as exc:
             try:
                 results = collector.stop_collecting()

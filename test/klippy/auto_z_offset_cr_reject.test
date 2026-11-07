@@ -1,5 +1,5 @@
 # Contact must be refused before homing, before heating or movement.
-CONFIG auto_z_offset.cfg
+CONFIG auto_z_offset_cr.cfg
 DICTIONARY atmega2560.dict
 SHOULD_FAIL
 

@@ -5706,41 +5706,32 @@ data_ready_pin:
 #   The default is 16.
 ```
 
-### [auto_z_offset]
+### [auto_z_offset_cr]
+
+Use **Contact Regression (`regression`)** to estimate nozzle contact with
+LCBestFit from the withdrawal force/Z curve. Select
+`config/auto_z_offset_regression.cfg` or the Force Trigger include, never both.
+Configure `[auto_z_offset_cr]` and query the matching status object.
 
 Fork-specific, user-invoked calibration of `[bltouch] z_offset` using one
 existing named `[load_cell]`. Keep CR Touch as the primary `probe`; do not
 also configure `[load_cell_probe]`. The sensor backend and MCU analog-trigger
 support must be available in the installed firmware. No new C protocol is
-introduced. See [setup and limitations](AUTO_Z_OFFSET_PLAN.md).
+introduced. See [method setup](AUTO_Z_OFFSET_PLAN.md) before enabling contacts.
 With two `probe_points`, AUTO_Z_OFFSET runs both supervised tests followed by
 calibration in one warm session. Separate test/calibration commands remain
 available. AUTO_Z_OFFSET includes full homing and mesh clear; the separate
 manual commands still require those preparation steps. Optional `[tjc_lcd]`
 uses a coordinate canvas to highlight each phase without full-screen redraws.
-It uses mainboard firmware with `TJC_CANVAS_VERSION=1` or the menu's existing
-`TJC_DRAW_VERSION=1`; drawing-only firmware reuses its generic executor
-without reflashing. No panel firmware update is needed. Drawing drains
-before measurement, and the calibration reserves the LCD against menus.
+It requires updated mainboard firmware with TJC_CANVAS_VERSION=1, but no panel
+firmware update. Drawing drains before measurement.
 
 ```ini
-[auto_z_offset]
+[auto_z_offset_cr]
 load_cell:
 #   Name from [load_cell name]. Reuses that sensor and its calibration.
-#contact_estimator: current
-#   Select current (existing descent-onset estimator) or prtouch (independent
-#   giorgiomaccari PRTouch replay). All three estimates, including legacy
-#   LCBestFit withdrawal, are reported when their acquired data permit it.
-#   Selection changes the numerical result, never acquisition, MCU stopping,
-#   travel bounds or the current onset-based approach reference.
-#   PRTouch results are comparison-only until physically validated: neither
-#   AUTO_Z_OFFSET_APPLY nor AUTO_Z_OFFSET_ACCEPT can use them. No fallback
-#   to another estimator occurs when the selected method is unsupported.
-#   Original PRTouch defaults require 80-SPS configuration, complete ADC
-#   samples and its filtered-count signal rules. Unsupported acquisitions
-#   return not_evaluable, without resampling or extrapolating a contact.
 #probe_point:
-#   Legacy single physical bed XY point, measured with five pairs.
+#   Single physical bed XY point, measured with five pairs.
 #probe_points:
 #   Two distinct physical bed XY points, one pair of coordinates
 #   per line. Each is measured with three fresh CR Touch/nozzle pairs.
@@ -5752,11 +5743,9 @@ load_cell:
 speed:
 lift_speed:
 #   Explicit nozzle approach and contact-release speeds in mm/s. Required.
-#   The speed option affects HX711 descent only, not CR Touch. The restored
-#   direct DEV approach uses its historical speed: 0.5. Each tap is one
-#   native MCU-stopped move to the existing bounded endpoint, without a host
-#   segment loop. lift_speed remains independent. The original withdrawal
-#   acquisition and fit are required; the regular load-cell probe retains
+#   Qualify both at the actual sensor sample rate. Auto Z-offset analyzes up
+#   to 5 seconds of the acquired ascent and still requires at least three
+#   samples on each side of contact. The regular load-cell probe retains
 #   its 0.3-second default window.
 trigger_force:
 force_safety_limit:
@@ -5764,10 +5753,6 @@ force_safety_limit:
 #   trigger_force 10..250, force_safety_limit 100..10000 and greater than
 #   trigger_force. These are allowed configuration ranges, not safe hardware
 #   recommendations. Never guess counts_per_gram in the load_cell section.
-#   trigger_force stops the native nozzle descent on the MCU. The raw
-#   force_safety_limit, sensor/communication monitoring and existing total
-#   travel endpoint remain active. Reaching that endpoint without a trigger
-#   rejects; there is no deeper retry or host-side onset stopping loop.
 #   Auto Z-offset captures an unloaded point reference at clearance with
 #   the existing ADC averaging API, once per point. The raw safety band
 #   is centered on this fixed reference for all pairs at that point.
@@ -5775,14 +5760,6 @@ force_safety_limit:
 #   band. Compression headroom must exceed trigger_force. Saved sensor
 #   calibration and reference_tare_counts are unchanged. Generic
 #   load_cell_probe retains its saved-reference safety behavior.
-#sample_retract_dist: 2
-#   Existing nozzle tap retraction distance in mm. Also bounds nozzle
-#   overtravel below each fresh CR Touch bed_z reference. Each approach
-#   passes this derived endpoint and maximum travel to the contact engine.
-#   Endpoints at/below native position_min or at/above travel clearance are
-#   rejected before the nozzle approach; no global-minimum fallback.
-#   This bounds travel on a missing trigger, not physical force or accuracy.
-#   Legacy local DEV test_* options are ignored and no longer required.
 #horizontal_move_z: 5
 #   Travel clearance in mm; must exceed the current probe Z offset.
 #travel_speed: 50
@@ -5805,12 +5782,6 @@ force_safety_limit:
 #   Maximum wait in seconds; must exceed temperature_stable_time.
 #offset_tolerance: 0.025
 #   Maximum spread in mm among paired offsets at each individual point.
-#   Also retained in the legacy branch-agreement diagnostic; it no longer
-#   vetoes contact onset because withdrawal is a hysteresis diagnostic.
-#   Each pair requires a supported descent onset using the existing drift,
-#   noise, correlation and window-confidence checks. Missing references or
-#   unresolved onset reject without a fallback to either legacy branch.
-#   This spread criterion is not an absolute physical accuracy bound.
 #spatial_tolerance: 0.025
 #   Maximum range in mm among local medians. Must be positive
 #   and no greater than 0.025. Exceeding it retains the diagnostic report
@@ -5866,6 +5837,39 @@ it does not identify saturation or excessive actual nozzle force by itself.
 Do not increase force limits to hide a failed contact. A fixed point reference
 prevents cumulative re-taring within the point from moving its safety bound;
 it does not certify equivalent physical force sensitivity over the bed.
+
+Both Auto Z-offset backends use the native configured Z minimum, clipped to
+kinematic limits, for pressure search. Maximum descent is start Z minus that
+minimum. `sample_retract_dist` controls CR tap withdrawal, not search travel;
+the saved probe offset is not used to select the endpoint. No-trigger or
+step-quantized endpoint results reject without a candidate. Mechanical limits
+and the configured MCU force/raw protections remain unchanged.
+
+### [auto_z_offset_ft]
+
+Use **Force Trigger (`force_trigger`)** through the
+`[auto_z_offset_ft]` section. Reference an existing named
+`load_cell`, keeps the CR Touch as the primary probe, and reports a provisional
+pressure-reference offset. Select only this backend or `[auto_z_offset_cr]`.
+The complete settings and selection examples are in
+[Auto_Z_Offset_Force_Trigger.md](Auto_Z_Offset_Force_Trigger.md) and
+`config/auto_z_offset_force_trigger.cfg`. Search uses the configured native Z
+minimum and is independent of `sample_retract_dist` or saved probe offset. The
+force and raw safety ceilings remain 75 g and 200 g. No firmware change is needed.
+
+`probe_points` is a multiline list of distinct physical bed XY
+pairs. Each point performs native CR Touch sampling and three pressure descents
+with its own local unloaded reference and the native mechanical search limit. Alternatively,
+`probe_point` selects the original single-point cycle; do not specify both.
+All nozzle and sensor destinations must fit native travel limits. Point offsets
+and their spatial range are reported separately without averaging or applying.
+
+`temperature_tolerance` is a positive finite margin in degrees C (default 3).
+Warm-up ends as soon as both heaters are within target +/- this margin,
+including the boundaries, without an additional PID-settling wait. The band is
+also enforced at measurement checkpoints. Out-of-band checkpoint readings,
+changed targets or invalid sensor readings reject the session. Native heater
+control and protections remain active.
 
 ### [load_cell_probe]
 Load Cell Probe. This combines the functionality of a [probe] and a [load_cell].
@@ -6266,28 +6270,3 @@ All other Klipper micro-controllers use a
 #   to 100000 and changing this value has no effect. The default is
 #   100000. Linux, RP2040 and ATmega support 400000.
 ```
-
-### Native Auto Z-offset backend
-
-The separate `[auto_z_offset_native]` backend references an existing named
-`load_cell`, keeps the CR Touch as the primary probe, and reports a provisional
-pressure-reference offset. Select only this backend or `[auto_z_offset]`.
-The complete settings and selection examples are in
-[Auto_Z_Offset_Native.md](Auto_Z_Offset_Native.md) and
-`config/sample-auto-z-offset-native.cfg`. `sample_retract_dist` must be explicitly
-set to at most 0.5 mm to preserve the current pressure travel allowance. The
-force and raw safety ceilings remain 75 g and 200 g. No firmware change is needed.
-
-`probe_points` is a multiline list of at least three distinct physical bed XY
-pairs. Each point performs native CR Touch sampling and three pressure descents
-with its own local unloaded reference and finite endpoint. Alternatively,
-`probe_point` selects the original single-point cycle; do not specify both.
-All nozzle and sensor destinations must fit native travel limits. Point offsets
-and their spatial range are reported separately without averaging or applying.
-
-`temperature_tolerance` is a positive finite margin in degrees C (default 3).
-Warm-up ends as soon as both heaters are within target +/- this margin,
-including the boundaries, without an additional PID-settling wait. The band is
-also enforced at measurement checkpoints. Out-of-band checkpoint readings,
-changed targets or invalid sensor readings reject the session. Native heater
-control and protections remain active.

@@ -7,8 +7,8 @@ import os
 import unittest
 from unittest import mock
 
-import test_auto_z_offset as engine_harness
-from test_auto_z_offset import auto, Config, Gcmd, lcprobe, Printer, ROOT
+import test_auto_z_offset_cr as engine_harness
+from test_auto_z_offset_cr import auto, Config, Gcmd, lcprobe, Printer, ROOT
 from test_load_cell_window_diagnostics import records, report
 
 
@@ -32,7 +32,8 @@ class DiagnosticCommandTests(unittest.TestCase):
             'load_cell_retract_dist': .5}
         with mock.patch.object(lcprobe, 'LoadCellTapHelper',
                                return_value=self.tap):
-            self.module = auto.AutoZOffset(Config(self.printer, self.config))
+            self.module = auto.ContactRegressionAutoZOffset(
+                Config(self.printer, self.config))
         self.module._connect()
         self.primary = self.printer.primary
         # Mock physical CR Touch delivery, keeping the actual session caller.
@@ -207,7 +208,8 @@ class DiagnosticCommandTests(unittest.TestCase):
         config = dict(self.config, **dict.fromkeys(retired, 'ignored'))
         with mock.patch.object(lcprobe, 'LoadCellTapHelper',
                                return_value=self.tap):
-            self.module = auto.AutoZOffset(Config(Printer(), config))
+            self.module = auto.ContactRegressionAutoZOffset(
+                Config(Printer(), config))
         # Constructor consumes obsolete keys without validating or using them.
         for name in retired:
             self.assertFalse(hasattr(self.module, name))

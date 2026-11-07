@@ -9,7 +9,7 @@ import unittest
 from unittest import mock
 
 import test_auto_z_offset_diagnostic as commands
-from test_auto_z_offset import auto, ROOT
+from test_auto_z_offset_cr import auto, ROOT
 
 onset = auto.load_cell_contact_onset
 

@@ -138,40 +138,37 @@ References: [setup and recovery](docs/TJC_LCD_Setup.md),
 ## Automatic Z-offset calibration
 
 > [!WARNING]
-> **AUTOMATIC Z-OFFSET IS EXPERIMENTAL. VALIDATE BEFORE PRINTING.**
+> **EXPERIMENTAL — VALIDATE BEFORE PRINTING.**
 >
-> The calculation is not perfect and may produce an inaccurate offset even
-> when measurements are repeatable and all checks pass. Keep your known-good
-> offset and verify nozzle-to-bed clearance before accepting or saving a new
-> value. **AN INCORRECT OFFSET CAN DRIVE THE NOZZLE INTO THE BUILD SURFACE
-> AND DAMAGE IT.**
+> **DO NOT TRUST A REPEATABLE RESULT AS PROOF OF ACCURACY. AN INCORRECT
+> Z-OFFSET CAN DRIVE THE NOZZLE INTO THE BUILD SURFACE AND DAMAGE IT.**
+> Keep a backup of your working offset. Verify physical clearance and validate
+> the result before accepting, saving or printing. Neither method automatically
+> applies or saves an offset.
 
-CR Touch handles homing and bed mesh as usual. The stock load cell measures
-nozzle contact to calculate the CR Touch Z-offset, without replacing the
-probe or adding another virtual endstop. Start calibration manually while
-the printer is idle and unpaused.
-**Do not add it to PRINT_START, startup or KAMP.** Printing continues to use
-the saved offset and the usual adaptive mesh.
+Keep CR Touch for homing and bed mesh. Use the stock load cell as a separate
+nozzle reference, then calculate `CR Touch test_z - nozzle_reference_z` in
+Klipper's kinematic coordinates. Choose one method:
 
-The two-point workflow uses physical bed coordinates X28/Y28 near the cell
-as P1, and X110/Y110 at the center as P2. Each CR Touch measurement is paired
-with nozzle contact at the same physical point, accounting for probe XY
-offsets. P1 supplies the candidate; P2 validates agreement without averaging.
-I've completed two-point runs on my printer with the LCD showing each
-calibration phase. A successful run still needs a first-layer check.
-I'm investigating a systematic difference from the offset that works for
-printing; the [diagnostic audit](docs/AUTO_Z_OFFSET_PLAN.md#systematic-offset-investigation-2026-10-30)
-has the details. Keep your working offset while that difference is unresolved
-and treat experimental results as diagnostic data. Repeatable measurements
-can still give an inaccurate offset.
+| Method | Identifier | Nozzle reference | Result |
+| --- | --- | --- | --- |
+| **Contact Regression (CR)** | `regression` | Estimate contact from the force/Z withdrawal curve with LCBestFit. | Review a candidate after repeatability and spatial checks. |
+| **Force Trigger (FT)** | `force_trigger` | Use Z at the MCU force threshold, 75 g in the supplied configuration. | Review a provisional, report-only offset under load. |
 
-### 1. Configure and check the load cell
+With CR, distinguish the fitted contact position from the MCU stop position.
+With FT, expect compression and possible signal delay at the force threshold;
+do not interpret that coordinate as zero-force first contact. Neither method
+establishes absolute accuracy merely by producing consistent measurements.
 
-Use this fork's host and matching MCU firmware, including HX711 acquisition
-and analog-trigger support (`CONFIG_WANT_HX71X` and
-`CONFIG_WANT_TRIGGER_ANALOG`, normally enabled). The ADC setup below has been
-tested on the stock Ender-3 V3 SE board. Add it to `printer.cfg` or an included
-file, keeping your existing `[bltouch]` and its working `z_offset`:
+Run calibration manually while idle and unpaused. **Do not add it to
+PRINT_START, startup or KAMP.** Keep the saved offset and normal adaptive mesh
+workflow for printing.
+
+### Configure and calibrate the load cell
+
+Use this fork's host and matching MCU firmware with HX711 acquisition and
+analog-trigger support (`CONFIG_WANT_HX71X`, `CONFIG_WANT_TRIGGER_ANALOG`).
+Keep your existing `[bltouch]` and configure the sensor **once**:
 
 ```ini
 [load_cell bed_force]
@@ -183,255 +180,112 @@ sample_rate: 80
 sensor_orientation: inverted
 ```
 
-Configure the sensor only once. Do not add `[load_cell_probe]`; Auto Z-offset
-reuses this named sensor and its calibration. After reloading Klipper while
-idle, check acquisition without motion or nozzle contact:
+Do not add `[load_cell_probe]` or duplicate the sensor pins. Check acquisition
+with `LOAD_CELL_DIAGNOSTIC LOAD_CELL=bed_force`: expect no sensor errors or
+saturation and approximately 80 samples/s.
 
-```gcode
-LOAD_CELL_DIAGNOSTIC LOAD_CELL=bed_force
-LOAD_CELL_READ LOAD_CELL=bed_force
-```
-
-The diagnostic collects ten seconds of samples. Check for no acquisition
-errors or saturation and a measured rate close to the configured 80 SPS.
-Before calibration, `LOAD_CELL_READ` displays raw percentage and `---.-g`.
-Apply and remove a small, controlled load at the sensing area to verify a
-repeatable response; the reading must change when load is applied.
-
-### 2. Calibrate the cell: tare first, then a known load
-
-**Do not start nozzle-contact tests with guessed or copied calibration
-values. TARE is essential:** it measures the unloaded reference used to
-calculate `counts_per_gram` and to save `reference_tare_counts`.
-
-Keep the normal build plate installed, the nozzle clear of the bed and the
-printer stationary. Remove added weights and external pressure, then start
-the guided session and take the unloaded reference:
+**CALIBRATE WITH TARE FIRST. DO NOT COPY ANOTHER PRINTER'S SCALE OR REFERENCE.**
+Keep the build plate installed, remove added load and keep the nozzle clear.
+Start the guided calibration, then capture the unloaded reference:
 
 ```gcode
 LOAD_CELL_CALIBRATE LOAD_CELL=bed_force
 TARE
 ```
 
-Wait for the tare response. Apply a stable load of known mass to the sensing
-area near P1, without nozzle contact. Enter its actual mass in grams; for an
-actual 1100 g calibration load, for example:
+Wait for the tare response, place a stable known mass at the sensing area,
+then run `CALIBRATE GRAMS=<actual_mass_in_grams>`. Enter the actual mass;
+do not use unmeasured hand pressure. On any error, run `ABORT` and resolve it
+before continuing. After successful calibration, run `ACCEPT`, remove the
+mass and review pending settings before `SAVE_CONFIG`.
 
-```gcode
-CALIBRATE GRAMS=1100
-```
+Save both measured `counts_per_gram` and `reference_tare_counts` through that
+workflow. `SAVE_CONFIG` writes pending settings and restarts Klipper. After
+restart, check with `LOAD_CELL_READ LOAD_CELL=bed_force` and the diagnostic.
+Outside guided calibration, use `LOAD_CELL_TARE LOAD_CELL=bed_force` for an
+operational zero; **that command does not calibrate the scale or save the
+reference**. Automatic local tares do not replace this sensor calibration.
 
-Do not enter `1100` unless that is the load actually applied, and do not use
-unmeasured hand pressure as a known mass. If Klipper reports identical
-readings, less than 1% difference, saturation or another calibration error,
-do not accept the result. Use `ABORT`, check load transfer and sensor response,
-then repeat the guided calibration with an appropriate known load.
+### Select one method
 
-Only after `CALIBRATE` succeeds, accept the sensor calibration:
+| Method | Configuration section and API object |
+| --- | --- |
+| Contact Regression | `auto_z_offset_cr` |
+| Force Trigger | `auto_z_offset_ft` |
 
-```gcode
-ACCEPT
-```
-
-Klipper reports the measured `counts_per_gram` and `reference_tare_counts`
-and stages them for saving. Remove the calibration weight, then persist them:
-
-```gcode
-SAVE_CONFIG
-```
-
-`SAVE_CONFIG` writes all pending settings to the active configuration and
-restarts Klipper. The generated `[load_cell bed_force]` entry in the
-SAVE_CONFIG block contains this printer's scale and unloaded reference.
-Do not replace these with numbers from another printer or edit that block
-by hand. This step calibrates the force sensor; it does not change CR Touch's
-Z-offset.
-
-After restart, with no added load, verify the calibrated sensor:
-
-```gcode
-LOAD_CELL_TARE LOAD_CELL=bed_force
-LOAD_CELL_READ LOAD_CELL=bed_force
-LOAD_CELL_DIAGNOSTIC LOAD_CELL=bed_force
-```
-
-The unloaded reading should be near zero, and an applied known load should
-produce a corresponding positive gram reading. In this workflow, `TARE`,
-`CALIBRATE`, `ACCEPT` and `ABORT` belong to the guided calibration session;
-a standalone `TARE` otherwise returns "Unknown command". Outside that session,
-`LOAD_CELL_TARE` adjusts the current zero only: **it does not calibrate the
-scale or save a new `reference_tare_counts`.** Auto Z-offset performs its
-own unloaded point-reference capture and local tares after warm-up; those
-do not replace the saved sensor calibration.
-
-### 3. Configure Auto Z-offset
-
-Once sensor acquisition and calibration work, add:
+Copy [auto_z_offset_regression.cfg](config/auto_z_offset_regression.cfg) and
+[auto_z_offset_force_trigger.cfg](config/auto_z_offset_force_trigger.cfg)
+into your printer configuration directory. Keep the shared `[bltouch]` and
+`[load_cell bed_force]` outside these files, then enable **exactly one**:
 
 ```ini
-[auto_z_offset]
-load_cell: bed_force
-probe_points:
-    28, 28
-    110, 110
-speed: 0.5
-lift_speed: 0.1
-sample_retract_dist: 0.5
-trigger_force: 75
-force_safety_limit: 200
-horizontal_move_z: 5
-travel_speed: 50
-z_hop_speed: 5
-bed_temp: 50
-nozzle_temp: 170
-temperature_tolerance: 2
-temperature_stable_time: 5
-temperature_recovery_time: 10
-heating_timeout: 600
-offset_tolerance: 0.025
-spatial_tolerance: 0.025
+# Contact Regression
+[include auto_z_offset_regression.cfg]
+
+# Force Trigger
+# [include auto_z_offset_force_trigger.cfg]
 ```
 
-Speeds are in mm/s and forces are in grams. The contact speeds, retract
-distance and 75/200 g thresholds above are what I use for testing on my
-printer. Check them on your own machine before relying on them; loading
-the configuration successfully does not validate nozzle contact.
-Keep the established force limits when updating an already qualified setup.
-`horizontal_move_z` must exceed the current probe offset. Both nozzle and
-CR Touch positions must be reachable for each physical point. This workflow
-does not support configured axis-twist, skew or thermal-Z compensation.
+For FT, comment out the CR include and uncomment the FT include. Remove any
+duplicate inline backend section before enabling its include. Restart Klipper
+while idle after switching. Use `[auto_z_offset_cr]` for CR or
+`[auto_z_offset_ft]` for FT, including in any existing include copies.
+No MCU reflash is needed to switch methods.
 
-The temperature settings above are the software defaults, with minimum
-bed/nozzle targets of 50/170 C. Normal PID fluctuations pause the warm-up
-timer or allow a limited wait for recovery. Changed targets or invalid
-readings stop the run. Set the tolerance to accommodate normal temperature
-variation without hiding sensor faults. The MCU analog trigger stops nozzle
-descent, and force, raw-range, acquisition and contact-fit checks reject
-invalid measurements.
+Set physical bed coordinates in `probe_points`, contact speed in mm/s,
+`trigger_force` and `force_safety_limit` in grams. The supplied files retain
+0.5 mm/s descent, 75 g trigger, 200 g raw limit and `temperature_tolerance: 3`.
+Use your validated sensor calibration and force limits; these examples do not
+certify safe loading on another printer.
 
-### 4. Run the automatic cycle and review the result
+### Run and review
 
-Reload Klipper while idle after adding the Auto Z-offset section. With a clean
-nozzle, an unobstructed bed and an idle printer, run:
+With a clean nozzle and unobstructed bed, run the same command for either
+method:
 
 ```gcode
-AUTO_Z_OFFSET
+AUTO_Z_OFFSET BED_TEMP=60 NOZZLE_TEMP=170
 ```
 
-Or explicitly select the calibration targets:
+- **CR:** heat, clear mesh and run full `G28`; test one paired CR Touch/nozzle
+  contact at each of P1/P2, then measure three fresh pairs per point. Use P1's
+  median and validate P2 agreement without averaging. Stop on any failed pair,
+  invalid fit, or excessive local/spatial spread.
+- **FT:** heat, clear mesh and home if needed; take CR Touch readings and three
+  force-triggered nozzle measurements at each configured point. Report each
+  median, provisional offset and spatial range. Keep P1 as the report reference
+  without averaging or enabling acceptance.
 
-```gcode
-AUTO_Z_OFFSET BED_TEMP=50 NOZZLE_TEMP=170
-```
+Both methods account for CR Touch XY offsets to measure the same physical
+point with the sensor and nozzle. Keep mesh corrections out of the calculation.
+MCU force/raw limits and native motion bounds remain active. Reaching the
+travel endpoint does not count as valid contact. A configured mechanical
+minimum alone does not guarantee nozzle clearance if force detection fails.
 
-The command warms up, clears the mesh and performs full `G28`; no separate
-homing or mesh clear is needed. It then runs two distinct measurement stages:
+Check `Auto Z-offset method` in the console. CR reports `Contact estimated Z`
+and `Z-offset`; FT reports `Force threshold`, `Triggered Z` and
+`Provisional Z-offset`. Compare the references as different measurements,
+not interchangeable definitions of first physical contact.
 
-| Stage | P1 | P2 | Purpose |
-| --- | --- | --- | --- |
-| Contact test | 1 CR Touch/nozzle pair | 1 CR Touch/nozzle pair | Check contact acquisition at both locations before calibration. |
-| Calibration | 3 fresh pairs | 3 fresh pairs | Calculate the candidate and validate repeatability and point agreement. |
+For CR only, after independent validation, explicitly stage with
+`AUTO_Z_OFFSET_ACCEPT`. Review all pending settings before `SAVE_CONFIG`;
+acceptance alone leaves the runtime offset unchanged. FT is report-only,
+without an ACCEPT/APPLY command. No measurement automatically saves settings.
 
-**Calibration starts only if both contact tests pass.** The two preliminary
-test pairs are excluded from the six-pair calibration result. Within each
-pair, CR Touch can take several readings according to its configured
-`[bltouch] samples`; three probe readings in the console do not mean three
-independent contact tests.
-
-At each point, the spread between results must stay within
-`offset_tolerance`. The difference between the two point medians must stay
-within `spatial_tolerance`. P1's median becomes the candidate; P2 checks it.
-Each pair estimates contact onset during descent, accounting for drift and
-checking noise, correlation and the fitting window. Withdrawal measurements
-help diagnose hysteresis but do not have to agree with descent for a candidate
-to pass. If contact onset cannot be resolved, the run stops rather than
-falling back to an older fit. Passing these checks does not prove accuracy.
-
-**Any failed contact or invalid measurement stops the sequence:** it does not
-continue with the next test/pair or accept the remaining samples. Force/raw
-limits, acquisition errors, thermal failures, invalid contact fits and
-excessive local/spatial spread reject the run. The error identifies the stage,
-point/pair and reason.
-Previous heater targets are restored on exit, the mesh stays cleared and the
-existing offset remains active. KAMP can create a fresh mesh for the next
-print as usual. Successful measurement leaves a candidate in memory only.
-
-Before trying a new offset, back up your working configuration and plan to
-watch the first layer. To try a valid normal candidate without saving it,
-run:
-
-```gcode
-AUTO_Z_OFFSET_APPLY
-```
-
-This changes only the temporary native G-code Z correction, with no immediate
-movement. It survives G28 in the current print-start macro. After ending or
-cancelling the print and draining motion, restore the previous correction:
-
-```gcode
-AUTO_Z_OFFSET_ROLLBACK
-```
-
-Diagnostic, rejected or stale results cannot be applied. The saved probe
-offset and load-cell calibration remain unchanged. Other macros that reset
-G-code Z offsets can cancel the trial; restarting Klipper discards it.
-See the [trial commands](docs/G-Codes.md#auto_z_offset_apply) for details.
-
-Once you've checked a fresh validated candidate and want to save it, run:
-
-```gcode
-AUTO_Z_OFFSET_ACCEPT
-SAVE_CONFIG
-```
-
-`AUTO_Z_OFFSET_ACCEPT` stages `[bltouch] z_offset`; it does not immediately
-apply it. `SAVE_CONFIG` writes the staged value along with any other pending
-settings and restarts Klipper. No measurement command automatically saves or
-overwrites the working offset.
-
-### Optional diagnostic commands
-
-For separate supervised tests, home and clear the mesh first:
-
-```gcode
-G28
-BED_MESH_CLEAR
-AUTO_Z_OFFSET_TEST_CONTACT POINT=1 BED_TEMP=50 NOZZLE_TEMP=170
-AUTO_Z_OFFSET_TEST_CONTACT POINT=2 BED_TEMP=50 NOZZLE_TEMP=170
-AUTO_Z_OFFSET_CALIBRATE BED_TEMP=50 NOZZLE_TEMP=170
-```
-
-`TEST_CONTACT` takes one pair at the selected point without saving.
-`CALIBRATE` takes three fresh pairs per point without requiring prior manual
-contact tests. These manual commands retain the homed/inactive-mesh
-prerequisites and qualify each fresh acquired contact before use.
-They are alternatives for diagnosis; the normal `AUTO_Z_OFFSET` command
-already includes their sequence and preparation. All measurement commands
-accept the same optional bed/nozzle targets.
+See the [method and command guide](docs/AUTO_Z_OFFSET_PLAN.md),
+[Force Trigger details](docs/Auto_Z_Offset_Force_Trigger.md),
+[configuration reference](docs/Config_Reference.md#auto_z_offset_cr) and
+[command reference](docs/G-Codes.md#auto_z_offset_cr).
 
 ### LCD calibration views
 
-The optional calibration screen highlights CR Touch Reference, Nozzle Contact
-and Computing Offset as the run progresses. It updates changed rows and the
-status strip without clearing the screen between phases.
-
-It needs mainboard firmware with `TJC_CANVAS_VERSION=1` or the menus'
-`TJC_DRAW_VERSION=1` under the LCD build option. If you already have the
-generic drawing firmware for the menus, no reflash is needed. The panel
-firmware and print-card protocol v5 stay the same.
-
-The host prepares each screen update, which finishes before the sensor
-measurements begin. There is no LCD traffic during sensor acquisition or
-contact fitting, and these screens only appear during idle calibration.
+Follow CR Touch Reference, Nozzle Contact and Computing Offset on the optional
+LCD with either method. Use the existing generic drawing firmware; no reflash
+is needed for layouts. Screen updates finish before sensor acquisition.
 
 | Warm-up | CR Touch reference | Nozzle contact |
 | --- | --- | --- |
-| <img src="Screenshots/autoz_s1.jpg" alt="Auto Z-offset screen warming the bed to 50 C and nozzle to 170 C" width="250"> | <img src="Screenshots/autoz_s2.jpg" alt="Auto Z-offset screen highlighting CR Touch Reference" width="250"> | <img src="Screenshots/autoz_s3.jpg" alt="Auto Z-offset screen highlighting Nozzle Contact" width="250"> |
-
-Further details: [setup and qualification](docs/AUTO_Z_OFFSET_PLAN.md),
-[configuration](docs/Config_Reference.md#auto_z_offset),
-[commands](docs/G-Codes.md#auto_z_offset) and
-[load-cell configuration](docs/Config_Reference.md#load_cell).
+| <img src="Screenshots/autoz_s1.jpg" alt="Auto Z-offset warm-up screen" width="250"> | <img src="Screenshots/autoz_s2.jpg" alt="CR Touch reference screen" width="250"> | <img src="Screenshots/autoz_s3.jpg" alt="Nozzle contact screen" width="250"> |
 
 ---
 

@@ -8,7 +8,7 @@ import os
 import unittest
 from unittest import mock
 
-from test_auto_z_offset import auto, Config, Gcmd, lcprobe, Printer, ROOT
+from test_auto_z_offset_cr import auto, Config, Gcmd, lcprobe, Printer, ROOT
 from test_load_cell_diagnostics import curve
 
 spec = importlib.util.spec_from_file_location('contact_replay', os.path.join(
@@ -221,7 +221,7 @@ class PairIntegrationTests(unittest.TestCase):
             'load_cell_retract_dist': .5}
         with mock.patch.object(lcprobe, 'LoadCellTapHelper',
                                return_value=self.tap):
-            self.module = auto.AutoZOffset(Config(
+            self.module = auto.ContactRegressionAutoZOffset(Config(
                 self.printer, {'probe_point': [28., 28.]}))
         self.module._connect()
         self.module._check_geometry()

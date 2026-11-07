@@ -8,7 +8,7 @@ import unittest
 from unittest import mock
 
 import test_auto_z_offset_diagnostic as commands
-from test_auto_z_offset import auto, Gcmd, ROOT
+from test_auto_z_offset_cr import auto, Gcmd, ROOT
 
 
 class RealOnsetIntegrationTests(unittest.TestCase):

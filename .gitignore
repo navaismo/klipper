@@ -27,6 +27,7 @@ klippy/.version
 *~
 .DS_Store
 Thumbs.db
+.Trash-1000
 
 # Local assistant state and credentials (never repository content)
 /.agents/

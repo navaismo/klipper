@@ -1,5 +1,15 @@
 # Configuration Changes
 
+20261106 (fork Auto Z-offset names): Rename `[auto_z_offset]` to
+`[auto_z_offset_cr]` (Contact Regression) and `[auto_z_offset_native]` to
+`[auto_z_offset_ft]` (Force Trigger). Update section headers in existing
+include copies and API/macro object references before restarting. Select
+exactly one of `auto_z_offset_regression.cfg` or
+`auto_z_offset_force_trigger.cfg`; keep the shared sensor calibration outside
+both files. Keep the AUTO_Z_OFFSET command unchanged. Use `backend: regression`
+or `backend: force_trigger` in status, with the corresponding method name.
+No MCU rebuild, movement or estimator change is required by this rename.
+
 20261106 (fork native contact rollback): Restore the direct MCU-force-triggered
 nozzle acquisition used before segmented onset stopping. Remove the segment
 executor, streaming snapshot polling and per-segment confirmation waits.
@@ -107,7 +117,7 @@ session, without accepting/saving. Existing commands remain available. With
 tjc_lcd, measurement commands show a host-prepared travel-only illustration
 through the existing v5 renderer; no MCU/panel firmware update is needed.
 Each LCD transfer drains before measurement. Error messages include the
-failed stage/point/pair; auto_z_offset.stage exposes the last step.
+failed stage/point/pair; auto_z_offset_cr.stage exposes the last step.
 
 20261029 (fork two-point Auto Z-offset): `probe_points` now accepts two
 locations with three fresh pairs each. The first point supplies the candidate

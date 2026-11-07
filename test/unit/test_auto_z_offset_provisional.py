@@ -10,7 +10,7 @@ import unittest
 from unittest import mock
 
 import test_auto_z_offset_diagnostic as workflows
-from test_auto_z_offset import auto, Config, Gcmd, lcprobe, Printer, ROOT
+from test_auto_z_offset_cr import auto, Config, Gcmd, lcprobe, Printer, ROOT
 
 native_move = importlib.import_module('extras.gcode_move')
 
@@ -21,7 +21,8 @@ class ProvisionalTests(unittest.TestCase):
         self.tap = mock.Mock()
         with mock.patch.object(lcprobe, 'LoadCellTapHelper',
                                return_value=self.tap):
-            self.module = auto.AutoZOffset(Config(self.printer))
+            self.module = auto.ContactRegressionAutoZOffset(
+                Config(self.printer))
         self.module._connect()
         # Exercise the real SET_GCODE_OFFSET and homing callbacks, never a
         # substitute implementation of their sign or persistence semantics.

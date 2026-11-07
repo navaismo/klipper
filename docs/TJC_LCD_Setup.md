@@ -269,9 +269,9 @@ firmware capability changed, restore a compatible saved host/firmware pair.
 
 Implementation and validation history: [LCD status plan](LCD_STATUS_PLAN.md).
 
-Both `[auto_z_offset]` and `[auto_z_offset_native]` reuse the same calibration
+Both `[auto_z_offset_cr]` and `[auto_z_offset_ft]` reuse the same calibration
 views through `[tjc_lcd]`. The native cycle shows the current point/sample and
 highlights CR Touch, nozzle contact and computing offset between acquisitions.
 It ends with a provisional review or failure screen. Existing generic drawing
 or canvas firmware is sufficient; switching calibration backends does not require
-a display firmware update. See [the native backend guide](Auto_Z_Offset_Native.md#lcd-calibration-views).
+a display firmware update. See [the Force Trigger guide](Auto_Z_Offset_Force_Trigger.md#lcd-calibration-views).

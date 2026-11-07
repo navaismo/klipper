@@ -8,7 +8,7 @@ import pathlib
 import sys
 import unittest
 from unittest import mock
-import test_auto_z_offset as fixtures
+import test_auto_z_offset_cr as fixtures
 
 with mock.patch.dict(sys.modules, {
         fixtures.PACKAGE: fixtures.package,
@@ -16,7 +16,7 @@ with mock.patch.dict(sys.modules, {
         fixtures.PACKAGE + '.manual_probe': fixtures.auto.manual_probe,
         fixtures.PACKAGE + '.probe': fixtures.lcprobe.probe,
         fixtures.PACKAGE + '.trigger_analog': fixtures.lcprobe.trigger_analog}):
-    native = importlib.import_module(fixtures.PACKAGE + '.auto_z_offset_native')
+    native = importlib.import_module(fixtures.PACKAGE + '.auto_z_offset_ft')
 
 
 class Config(fixtures.Config):
@@ -29,7 +29,7 @@ class Config(fixtures.Config):
             self.data.pop('probe_point', None)
         self.sections = sections
     def get_name(self):
-        return 'auto_z_offset_native'
+        return 'auto_z_offset_ft'
     def has_section(self, name):
         return super().has_section(name) or name in self.sections
 
@@ -41,6 +41,7 @@ class NativeWorkflowTests(unittest.TestCase):
         self.trigger = mock.Mock()
         self.trigger.get_last_trigger_time.return_value = 3.
         self.move = mock.Mock()
+        self.move.get_probe_bounds.return_value = (-3., 8.)
         self.zs = iter([-.3, -.305, -.31])
         self.collectors = []
         self.move.probing_move.side_effect = self.press
@@ -54,7 +55,7 @@ class NativeWorkflowTests(unittest.TestCase):
             patch = mock.patch.object(owner, name, return_value=result)
             self.factories[name] = patch.start()
             self.addCleanup(patch.stop)
-        self.module = native.NativeAutoZOffset(Config(self.p))
+        self.module = native.ForceTriggerAutoZOffset(Config(self.p))
         self.module._connect()
     def press(self, gcmd, minimum_z=None, maximum_descent=None):
         z = next(self.zs)
@@ -71,6 +72,32 @@ class NativeWorkflowTests(unittest.TestCase):
         self.module.cmd_AUTO_Z_OFFSET(cmd)
         return self.module.result
 
+    def test_force_trigger_name_threshold_and_report_only(self):
+        cmd = fixtures.Gcmd('AUTO_Z_OFFSET')
+        self.module.cmd_AUTO_Z_OFFSET(cmd)
+        text = '\n'.join(c.args[0]
+                         for c in cmd.respond_info.call_args_list)
+        self.assertIn('Auto Z-offset method: Force Trigger', text)
+        self.assertIn('Force threshold: 75 g', text)
+        self.assertIn('Triggered Z: -0.305000 mm', text)
+        self.assertIn('Provisional Z-offset: 1.470000 mm', text)
+        self.assertEqual(self.module.get_status(0.)['backend'], 'force_trigger')
+        self.assertEqual(self.module.result['method'], 'Force Trigger')
+        self.assertFalse(self.module.result['eligible_for_application'])
+        self.p.objects['configfile'].set.assert_not_called()
+
+    def test_force_threshold_message_uses_configured_value(self):
+        self.p.gcode.commands.pop('AUTO_Z_OFFSET')
+        self.module = native.ForceTriggerAutoZOffset(Config(
+            self.p, {'trigger_force': 60.}))
+        self.module._connect()
+        cmd = fixtures.Gcmd('AUTO_Z_OFFSET')
+        self.module.cmd_AUTO_Z_OFFSET(cmd)
+        messages = [c.args[0] for c in cmd.respond_info.call_args_list]
+        self.assertIn('Auto Z-offset method: Force Trigger\n'
+                      'Force threshold: 60 g', messages)
+        self.p.objects['configfile'].set.assert_not_called()
+
     def test_constructs_only_native_raw_probe_with_existing_sensor(self):
         self.factories['MCU_trigger_analog'].assert_called_once_with(
             self.p.cell.sensor)
@@ -85,10 +112,11 @@ class NativeWorkflowTests(unittest.TestCase):
         self.assertEqual(set(self.p.gcode.commands), {'AUTO_Z_OFFSET'})
 
     def test_other_backend_rejected_before_mcu_or_sensor_initialization(self):
-        for section in ('auto_z_offset', 'load_cell_probe', 'prtouch'):
+        for section in ('auto_z_offset_cr', 'load_cell_probe', 'prtouch'):
             before = self.factories['MCU_trigger_analog'].call_count
             with self.assertRaisesRegex(RuntimeError, 'not both'):
-                native.NativeAutoZOffset(Config(self.p, sections=(section,)))
+                native.ForceTriggerAutoZOffset(
+                    Config(self.p, sections=(section,)))
             self.assertEqual(self.factories['MCU_trigger_analog'].call_count,
                              before)
 
@@ -99,8 +127,8 @@ class NativeWorkflowTests(unittest.TestCase):
         presses = [t for t in self.p.trace if t[0] == 'pressure']
         self.assertEqual(len(presses), 3)
         for event in presses:
-            self.assertAlmostEqual(event[1], -.4)
-            self.assertAlmostEqual(event[2], 5.4)
+            self.assertAlmostEqual(event[1], -3.)
+            self.assertAlmostEqual(event[2], 8.)
             self.assertEqual(event[3][:3], [28., 28., 5.])
         self.assertAlmostEqual(result['pressure_z'], -.305)
         self.assertAlmostEqual(result['provisional_z_offset'], 1.470)
@@ -173,8 +201,8 @@ class NativeWorkflowTests(unittest.TestCase):
         bed_z = sum((.145, .1475, .145))/3.
         self.p.primary.height = 1.065 + bed_z
         def no_trigger(gcmd, minimum_z=None, maximum_descent=None):
-            self.assertAlmostEqual(minimum_z, -.3541666666666667)
-            self.assertAlmostEqual(maximum_descent, 5.354166666666667)
+            self.assertAlmostEqual(minimum_z, -3.)
+            self.assertAlmostEqual(maximum_descent, 8.)
             # Simulate native termination at the endpoint, not a hardware run.
             self.p.toolhead.position[2] = minimum_z
             raise RuntimeError('No trigger on probe after full movement')
@@ -184,7 +212,7 @@ class NativeWorkflowTests(unittest.TestCase):
         self.assertIsNone(self.module.result)
         self.assertEqual(self.move.probing_move.call_count, 1)
         self.assertAlmostEqual(self.p.toolhead.get_position()[2],
-                               -.3541666666666667)
+                               -3.)
         self.assertEqual(self.p.primary.offsets[2], 1.065)
         self.p.objects['configfile'].set.assert_not_called()
 
@@ -209,7 +237,7 @@ class NativeWorkflowTests(unittest.TestCase):
 
     def test_no_positive_mcu_timestamp_is_not_contact(self):
         self.trigger.get_last_trigger_time.return_value = 0.
-        with self.assertRaisesRegex(RuntimeError, 'MCU pressure trigger'):
+        with self.assertRaisesRegex(RuntimeError, 'MCU force trigger'):
             self.run_command()
         self.assertIsNone(self.module.result)
         self.assertEqual(self.p.toolhead.get_position()[2], -.3)
@@ -228,9 +256,10 @@ class NativeWorkflowTests(unittest.TestCase):
         self.p.primary.sessions[0].end_probe_session.assert_called_once()
         self.move.probing_move.assert_not_called()
 
-    def test_floor_cannot_fall_back_to_global_minimum(self):
-        self.p.primary.height = -2.
-        with self.assertRaisesRegex(RuntimeError, 'outside native Z range'):
+    def test_invalid_native_bounds_prevent_pressure_descent(self):
+        self.move.get_probe_bounds.side_effect = RuntimeError(
+            'Invalid native Z search bounds')
+        with self.assertRaisesRegex(RuntimeError, 'Invalid native Z'):
             self.run_command()
         self.move.probing_move.assert_not_called()
 
@@ -363,7 +392,7 @@ class NativeWorkflowTests(unittest.TestCase):
                     self.module._check_context(targets, calibration)
 
     def test_configured_temperature_margin_is_used(self):
-        module = native.NativeAutoZOffset(Config(
+        module = native.ForceTriggerAutoZOffset(Config(
             fixtures.Printer(), {'temperature_tolerance': 5.}))
         module._connect()
         targets = [(module.bed, 60.), (module.nozzle, 170.)]
@@ -379,7 +408,7 @@ class NativeWorkflowTests(unittest.TestCase):
     def test_temperature_margin_requires_positive_finite_value(self):
         for value in (0., -1., float('nan'), float('inf')):
             with self.assertRaises(RuntimeError):
-                native.NativeAutoZOffset(Config(
+                native.ForceTriggerAutoZOffset(Config(
                     fixtures.Printer(), {'temperature_tolerance': value}))
 
     def test_margin_never_accepts_invalid_sensor_or_changed_target(self):
@@ -446,7 +475,7 @@ class NativeWorkflowTests(unittest.TestCase):
         for data in ({'trigger_force': 76.}, {'force_safety_limit': 201.}):
             before = self.factories['MCU_trigger_analog'].call_count
             with self.assertRaises(RuntimeError):
-                native.NativeAutoZOffset(Config(self.p, data))
+                native.ForceTriggerAutoZOffset(Config(self.p, data))
             self.assertEqual(self.factories['MCU_trigger_analog'].call_count,
                              before)
 
@@ -532,7 +561,7 @@ class NativeWorkflowTests(unittest.TestCase):
     def configure_three_points(self, points=None):
         points = points or [(28., 28.), (110., 110.), (180., 28.)]
         self.p.gcode.commands.pop('AUTO_Z_OFFSET')
-        self.module = native.NativeAutoZOffset(Config(
+        self.module = native.ForceTriggerAutoZOffset(Config(
             self.p, {'probe_points': points}))
         self.module._connect()
         heights = iter([1.165, 1.015, 1.19])
@@ -554,7 +583,7 @@ class NativeWorkflowTests(unittest.TestCase):
         for index, point in enumerate(self.module.points):
             for e in pressures[3*index:3*index+3]:
                 self.assertEqual(e[3][:3], list(point)+[5.])
-                floor = [1.165, 1.015, 1.19][index] - 1.065 - .5
+                floor = -3.
                 self.assertAlmostEqual(e[1], floor)
                 self.assertAlmostEqual(e[2], 5.-floor)
             self.assertAlmostEqual(result['points'][index][
@@ -658,7 +687,7 @@ class NativeWorkflowTests(unittest.TestCase):
         for points in data:
             count = self.factories['MCU_trigger_analog'].call_count
             with self.assertRaises(RuntimeError):
-                native.NativeAutoZOffset(Config(
+                native.ForceTriggerAutoZOffset(Config(
                     self.p, {'probe_points': points}))
             self.assertEqual(self.factories['MCU_trigger_analog'].call_count,
                              count)
@@ -667,11 +696,11 @@ class NativeWorkflowTests(unittest.TestCase):
         data = {'probe_point': [28., 28.], 'probe_points':
                 [(28., 28.), (110., 110.), (180., 28.)]}
         with self.assertRaisesRegex(RuntimeError, 'not both'):
-            native.NativeAutoZOffset(Config(self.p, data))
+            native.ForceTriggerAutoZOffset(Config(self.p, data))
 
     def test_multiline_points_accept_more_than_three_locations(self):
         self.p.gcode.commands.pop('AUTO_Z_OFFSET')
-        module = native.NativeAutoZOffset(Config(self.p, {'probe_points':
+        module = native.ForceTriggerAutoZOffset(Config(self.p, {'probe_points':
             '28, 28\n110, 110\n180, 28\n28, 180'}))
         self.assertEqual(module.points, ((28., 28.), (110., 110.),
                                          (180., 28.), (28., 180.)))
@@ -930,15 +959,32 @@ class NativeMotionPrimitiveTests(unittest.TestCase):
 
 class NativeProfileTests(unittest.TestCase):
     def test_profiles_share_load_cell_and_select_separate_backends(self):
-        for name, section in [('current', 'auto_z_offset'),
-                              ('native', 'auto_z_offset_native')]:
+        for name, section in [('regression', 'auto_z_offset_cr'),
+                              ('force_trigger', 'auto_z_offset_ft')]:
             cfg = configparser.ConfigParser()
             cfg.read(pathlib.Path(fixtures.ROOT)/'config'/(
-                'sample-auto-z-offset-%s.cfg' % name))
+                'auto_z_offset_%s.cfg' % name))
             self.assertEqual(cfg.sections(), [section])
             self.assertEqual(cfg[section]['load_cell'], 'bed_force')
             self.assertEqual(cfg[section]['trigger_force'], '75')
             self.assertEqual(cfg[section]['force_safety_limit'], '200')
+
+    def test_existing_sample_paths_keep_sensor_and_motion_parameters(self):
+        for name, old, section in [
+                ('regression', 'current', 'auto_z_offset_cr'),
+                ('force_trigger', 'native', 'auto_z_offset_ft')]:
+            canonical, compatible = (configparser.ConfigParser(),
+                                     configparser.ConfigParser())
+            config_dir = pathlib.Path(fixtures.ROOT)/'config'
+            canonical.read(config_dir/('auto_z_offset_%s.cfg' % name))
+            compatible.read(config_dir/('sample-auto-z-offset-%s.cfg' % old))
+            self.assertEqual(compatible.sections(), [section])
+            before, after = (dict(compatible[section]),
+                             dict(canonical[section]))
+            # Choose points independently in either example include.
+            before.pop('probe_points')
+            after.pop('probe_points')
+            self.assertEqual(before, after)
 
 
 if __name__ == '__main__':

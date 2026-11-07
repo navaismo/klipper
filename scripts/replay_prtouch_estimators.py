@@ -11,7 +11,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'test', 'unit'))
 # Existing offline harness provides LCBestFit's printer/MCU imports.
-from test_auto_z_offset import auto, lcprobe, Printer
+from test_auto_z_offset_cr import auto, lcprobe, Printer
 
 
 def records(data):
