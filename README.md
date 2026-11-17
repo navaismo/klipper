@@ -26,8 +26,9 @@ CR Touch and the stock load cell.
 
 The print card stays unchanged while printing or paused. It shows the file's
 estimated total time and temperature targets, with no live progress, layer,
-remaining-time or heater updates. The Load/Unload screen shows the current
-nozzle temperature while that operation runs with the printer idle.
+remaining-time or heater updates. The Load/Unload screen updates nozzle
+temperature while heating, then stays static while feeding or retracting
+filament.
 
 The mainboard's C driver handles the LCD connection over USART2, serial
 frames and drawing commands. The host prepares the screen content without
@@ -35,7 +36,8 @@ opening an LCD serial port.
 
 ## On my printer
 
-Here are the idle screen, both menus and two print cards on my printer.
+Here are the idle screen, menus and two print cards on my printer. The menu
+photos show the earlier layout; the current hierarchy is listed below.
 
 <img src="Screenshots/IdleV7.jpg" alt="Idle screen with Klipper branding and MCU firmware revision and build date" width="300">
 
@@ -84,6 +86,31 @@ for this LCD.
 
 ## Knob operation
 
+The `Klipper Menu` now has this structure:
+
+```text
+Homing XYZ
+Movements
+  Move XYZ
+  Disable Motors
+  Deploy Probe / Stow Probe
+Filament
+  Unload / Load / Preheat / Cooldown
+Tune
+  Start Autooffset
+    Contact Regression (CR) / Force Trigger (FT)
+  Start Bed Level
+  View Bed Grid IsoMap
+Info
+  Info Version / Info Printer / Info GitHub
+```
+
+Each submenu has Back. Autooffset runs the configured CR or FT module;
+switching methods still requires selecting its include and reloading Klipper.
+Bed Level homes and runs the configured mesh calibration. IsoMap shows the
+active probed mesh as a static colored surface, with measured min/max/range.
+Click to return from a map or information page.
+
 Turn the knob either way while the idle screen is visible to open the menu.
 Turn clockwise to move down or counterclockwise to move up, then click to
 open a submenu or run the selected action. Hold for 0.8 seconds to return
@@ -103,7 +130,10 @@ mm/min. Press the knob to cancel: the active drawing transaction or queued
 extrusion segment finishes first (at most 1 mm of extrusion), then the
 nozzle turns off and the main menu returns. Completion and recoverable
 errors also turn the nozzle off. The operation restores G-code state and
-leaves the bed target unchanged.
+leaves the bed target unchanged. Once the nozzle is ready, a final screen
+update finishes before extrusion. No LCD updates run while feeding or
+retracting. A short queue keeps at most 1 mm outstanding and refills without
+waiting for every segment to finish.
 
 During a print, each new debounced press runs `PAUSE` once. Rotations do
 nothing during printing or pause, and clicks do nothing while paused.

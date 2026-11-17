@@ -187,7 +187,12 @@ The optional fork-specific [tjc_menu](Config_Reference.md#tjc_menu) object
 provides:
 
 - `active`: True while the menu owns the screen, including its actions.
-- `page`: `main`, `move`, or null when closed.
+- `page`: `main`, `movement`, `move`, `filament`, `tune`, `autooffset`,
+  `info`, or null when closed.
+- `view`: `mesh`, `view:version`, `view:printer`, `view:github`, or
+  `calibration` while showing a static view/result; otherwise null.
+  `page` and `selected` retain the menu location to restore when the view
+  closes.
 - `selected`: The selected entry's label, or null when closed.
 - `busy`: True during a menu drawing or menu action. Navigation is discarded;
   a stable knob press can still cancel an active filament operation.

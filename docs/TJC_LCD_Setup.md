@@ -2,9 +2,10 @@
 
 This guide installs the fork's current LCD setup: an idle screen with MCU
 firmware identification, knob menus, filament controls, and a static print
-card with a 120x120 displayed thumbnail. The owner confirmed the current
-appearance on the original STM32F103RET6/TJC3224T1 hardware; see the
-[hardware photos](../README.md#hardware-photos).
+card with a 120x120 displayed thumbnail. The
+[hardware photos](../README.md#on-my-printer) show the original
+STM32F103RET6/TJC3224T1 setup and the earlier menu layout. The nested menu
+and IsoMap described here still need physical display validation.
 
 Use an existing working Klipper, Moonraker and Fluidd installation. Keep
 the printer's calibrated motor, sensor, heater and macro configuration.
@@ -180,27 +181,72 @@ Action, print-pause and filament-cancel clicks do not use this cooldown.
 Pre-print preparation blocks menu input. A press captured for an old job
 cannot pause a new job.
 
-| Menu entry | Action |
+| Menu path | Action |
 | --- | --- |
-| Home All Axes | Run the configured `G28`, including overrides |
-| Preheat - B50, N170 | Set bed to 50 C and nozzle to 170 C, without waiting |
-| More Moves... | Open six 10 mm XYZ moves and Back |
-| Move Z Up / Down | Z +10 / -10 mm, at 2 mm/s |
-| Move X Left / Right | X -10 / +10 mm, at 20 mm/s |
-| Move Y Front / Back | Y +10 / -10 mm, at 20 mm/s on this printer |
-| Load Filament | Heat nozzle to 240 C; 50 mm at F800, then 40 mm at F400 |
-| Unload Filament | Heat nozzle to 240 C; purge 15 mm at F400, retract 90 mm at F800 |
+| Homing XYZ | Run the configured `G28`, including overrides |
+| Movements > Move XYZ | Open six 10 mm XYZ moves |
+| Movements > Disable Motors | Run `M84`; home again before moving axes |
+| Movements > Deploy / Stow Probe | Run `BLTOUCH_DEBUG COMMAND=pin_down` / `pin_up` |
+| Filament > Unload | Heat to 240 C; purge 15 mm at F400, retract 90 mm at F800 |
+| Filament > Load | Heat to 240 C; feed 50 mm at F800, then 40 mm at F400 |
+| Filament > Preheat | Set bed to 50 C and nozzle to 170 C, without waiting |
+| Filament > Cooldown | Run `TURN_OFF_HEATERS` |
+| Tune > Start Autooffset > Contact Regression (CR) / Force Trigger (FT) | Run `AUTO_Z_OFFSET` only for the configured method |
+| Tune > Start Bed Level | Run `G28`, then the configured `BED_MESH_CALIBRATE` |
+| Tune > View Bed Grid IsoMap | Show a static isometric surface from the active probed mesh |
+| Info > Info Version | Show the connected MCU build identifier and Klippy version |
+| Info > Info Printer | Show printer model, homed axes and XYZ travel limits |
+| Info > Info GitHub | Show the fork and upstream GitHub addresses |
+
+Every submenu has Back, which restores the parent's highlight. The title is
+`Klipper Menu`. The orange/blue logo, red K and white `lipper` stay visible
+between menu pages. Hold for 0.8 seconds to return to the idle screen with its
+MCU firmware/date footer. Information and mesh views return with one click;
+rotations do not change them.
+
+Move XYZ uses Z +10 / -10 mm at 2 mm/s, X -10 / +10 mm at 20 mm/s, and
+Y Front +10 / Back -10 mm at 20 mm/s. Probe controls require `[bltouch]`.
+Cooldown turns off all configured heaters through the normal command.
+
+Autooffset uses the existing calibration modules and their checks. Enable
+exactly one of `[auto_z_offset_cr]` and `[auto_z_offset_ft]`. Selecting the
+other entry displays an explanation; the menu does not switch configuration,
+restart Klipper, accept a candidate or save a result. CR and FT share the
+`AUTO_Z_OFFSET` command, so enabling both modules is not supported.
+The calibration phase screen stays visible after completion or rejection;
+click to return to the Autooffset submenu without repeating the command.
+
+Bed Level requires `[bed_mesh]` and uses its existing command, including
+macro overrides such as KAMP. It does not save a profile or configuration.
+The IsoMap reads the active mesh's probed points once, with no probing,
+profile loading, mesh edits or periodic refresh. It follows the projection
+and zero-centered blue/cyan/green/yellow/red palette from Marlin's
+`bed_level_visualizer.cpp` and `bed_level_surface.h`. The host fills the
+triangulated surface, shows minimum/maximum/range in mm, and scales visual
+height automatically. Measured-cell outlines follow the projected surface,
+with labeled X/Y/Z axes underneath it. Near cells occlude far grid lines and
+axes, following Marlin's painter order. A horizontal heat bar below the map
+runs from negative blue on the left, through green at zero, to positive red
+on the right, with signed range labels in mm. Rows follow Klipper's Y order;
+positive X projects right and positive Y left. Grids from 2x2 through 64x64 are supported.
+A missing, incomplete or invalid mesh displays an error instead of a plot.
 
 Moves require homing and an in-range full destination; they never home
 implicitly. Successful Home, Preheat and Movement actions preserve the
 visible menu/highlight without redrawing. Errors appear once; click to
 dismiss without repeating the failed action.
 
-Filament speeds are mm/min. The Load/Unload screen shows current nozzle
-temperature, phase and `Press to cancel`. Changed temperatures update at
-most once per second, only during that operation. Heating has a five-minute
-deadline. Extrusion queues at most 1 mm at a time; cancellation waits for
-the active drawing transaction or queued segment, then queues no more
+Filament speeds are mm/min. The Load/Unload screen shows nozzle temperature,
+phase and `Press to cancel`. During heating, changed temperatures update at
+most once per second. Once ready, a final temperature/phase update completes
+before extrusion starts; the screen then stays static until cleanup.
+Heating has a five-minute deadline. Extrusion streams 0.5 mm segments with
+at most 1 mm outstanding. MCU print-time estimates release queue capacity
+while the next segment is still scheduled, avoiding a full motion drain
+between segments. The normal extruder acceleration and safety limits still
+apply. Host delays can still cause an underrun; uninterrupted physical motion
+requires hardware validation. Cancellation waits for the active drawing
+transaction or the remaining queued extrusion, then queues no more
 extrusion. Completion, cancellation and recoverable errors turn the nozzle
 target off and restore G-code modes/extrusion coordinates. The bed target
 stays unchanged. Normal heater and extrusion checks remain enabled.

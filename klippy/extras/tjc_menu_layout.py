@@ -9,13 +9,44 @@ except ImportError:
 
 BACKGROUND, WHITE, CYAN, ORANGE = 0x0863, 0xffff, 0x05ff, 0xfc00
 RED = 0xf920
-MAIN = ('Home All Axes', 'Load Filament', 'Unload Filament',
-        'Preheat - B50, N170', 'More Moves...')
+MAIN = ('Homing XYZ', 'Movements', 'Filament', 'Tune', 'Info')
 MOVES = ('Move Z Up (10mm)', 'Move Z Down (10mm)',
          'Move X Left (10mm)', 'Move X Right (10mm)',
          'Move Y Front (10mm)', 'Move Y Back (10mm)', 'Back')
-ROWS = {'main': (76, 122, 150, 198, 246),
-        'move': (76, 105, 143, 172, 210, 239, 284)}
+PAGES = {
+    'main': ('Klipper Menu', MAIN,
+             ('home', 'page:movement', 'page:filament', 'page:tune',
+              'page:info'),
+             ('home', 'right', 'spool', 'temperature', 'right')),
+    'movement': ('Movements',
+                 ('Move XYZ', 'Disable Motors', 'Deploy Probe',
+                  'Stow Probe', 'Back'),
+                 ('page:move', 'disable', 'deploy', 'stow', 'back'),
+                 ('right', 'home', 'down', 'up', 'left')),
+    'move': ('Move (10mm)', MOVES,
+             ('z+', 'z-', 'x-', 'x+', 'y+', 'y-', 'back'),
+             ('up', 'down', 'left', 'right', 'up', 'down', 'left')),
+    'filament': ('Filament', ('Unload', 'Load', 'Preheat', 'Cooldown', 'Back'),
+                 ('unload', 'load', 'preheat', 'cooldown', 'back'),
+                 ('spool', 'spool', 'temperature', 'temperature', 'left')),
+    'tune': ('Tune', ('Start Autooffset', 'Start Bed Level',
+                     'View Bed Grid IsoMap', 'Back'),
+             ('page:autooffset', 'level', 'mesh', 'back'),
+             ('right', 'home', 'right', 'left')),
+    'autooffset': ('Start Autooffset',
+                  ('Contact Regression (CR)', 'Force Trigger (FT)', 'Back'),
+                  ('auto:cr', 'auto:ft', 'back'),
+                  ('right', 'right', 'left')),
+    'info': ('Info', ('Info Version', 'Info Printer', 'Info GitHub', 'Back'),
+             ('view:version', 'view:printer', 'view:github', 'back'),
+             ('right', 'home', 'right', 'left')),
+}
+PARENTS = {'movement': ('main', 1), 'move': ('movement', 0),
+           'filament': ('main', 2), 'tune': ('main', 3),
+           'autooffset': ('tune', 0), 'info': ('main', 4)}
+ROWS = dict((page, tuple(80+index*(174//max(1, len(data[1])-1))
+                        for index in range(len(data[1]))))
+            for page, data in PAGES.items())
 
 # Sixteen-pixel icons are host assets, never compiled into MCU firmware.
 ICONS = {
@@ -99,30 +130,16 @@ def screen(page, selected, header=True):
     else:
         # Menu and Move share their header; only replace the body.
         ops = [draw.rectangle(BACKGROUND, 0, 50, 239, 319)]
-    ops += heading('Menu' if page == 'main' else 'Move (10mm)', 52)
-    labels = MAIN if page == 'main' else MOVES
-    names = (('home', 'spool', 'spool', 'temperature', 'right')
-             if page == 'main' else
-             ('up', 'down', 'left', 'right', 'up', 'down', 'left'))
+    title, labels, actions, names = PAGES[page]
+    ops += heading(title, 52)
     for index, label in enumerate(labels):
         y = ROWS[page][index]
         ops += icon(names[index], 15, y)
-        if page == 'main' and index == 3:
-            ops += [draw.text('Preheat -', 39, y),
-                    draw.text('B50, N170', 119, y, ORANGE)]
-        else:
-            ops.append(draw.text(label, 39, y))
-        if index != len(labels)-1 or page == 'main':
-            ops += icon('right', 215, y, WHITE)
-    if page == 'main':
-        for label, y in (('Filament', 100), ('Temperature', 176),
-                         ('Movement', 224)):
-            ops += heading(label, y)
-        ops += [draw.rectangle(CYAN, 14, 278, 225, 278),
-                centered('Press&Hold Knob: Idle Screen', 292)]
-    else:
-        for y in (133, 200, 271):
-            ops.append(draw.rectangle(CYAN, 14, y, 225, y))
+        ops.append(draw.text(label, 39, y))
+        if actions[index].startswith('page:'):
+            ops += icon('right', 215, y)
+    ops += [draw.rectangle(CYAN, 14, 278, 225, 278),
+            centered('Press&Hold Knob: Idle Screen', 292)]
     return ops + selection(page, selected)
 
 

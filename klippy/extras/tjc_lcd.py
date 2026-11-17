@@ -365,8 +365,12 @@ class TJCLCD:
             raise self.gcode.error(
                 'Host-designed LCD screens require TJC_DRAW_VERSION=1 firmware')
         self.idle_generation += 1
-        self._render(lcd_draw.prepare(operations), 'menu',
-                     commands=self.draw_commands)
+        # Validate every operation before claiming the UART. Large host-made
+        # mesh surfaces use the same bounded executor as ordinary menu pages.
+        for transfer in lcd_draw.prepare_batches(operations):
+            if not self.can_interact():
+                raise self.gcode.error('LCD drawing requires an idle printer')
+            self._render(transfer, 'menu', commands=self.draw_commands)
 
     def render_job(self, job, recover=False):
         if self.printer.get_start_args().get('debugoutput') is not None:

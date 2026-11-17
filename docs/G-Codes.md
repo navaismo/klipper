@@ -460,7 +460,13 @@ selection. Menu Home uses the existing `G28` command; other idle actions
 use normal host heater/motion interfaces. Load/Unload heat to 240 C and
 accept a cancel press; both turn the nozzle off after cleanup. See the
 [action table](TJC_LCD_Setup.md#knob-controls-and-actions) for distances,
-speeds, homing and travel checks.
+speeds, homing and travel checks. The Klipper Menu groups actions under
+Movements, Filament, Tune and Info. Movements uses `M84` and `BLTOUCH_DEBUG`
+for motor/probe controls; Cooldown uses `TURN_OFF_HEATERS`. Tune calls
+`AUTO_Z_OFFSET` only for the configured CR/FT module, and runs `G28` then
+`BED_MESH_CALIBRATE` for Bed Level. It never accepts/saves calibration.
+The static IsoMap reads the active probed mesh without running a command.
+Load/Unload sends no LCD updates once extrusion starts.
 
 During an active print, a new debounced knob press executes the existing
 `PAUSE` command once, including configured macro overrides. No screen

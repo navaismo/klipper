@@ -7,6 +7,7 @@ import test_tjc_lcd as startup
 import lcd_draw
 import tjc_menu
 import tjc_menu_layout as layout
+import tjc_menu_views as views
 import lcd_canvas
 import buttons
 import gcode_move
@@ -95,11 +96,13 @@ class DrawingTests(unittest.TestCase):
         self.assertEqual(ccw.call_count, 1)
 
     def test_all_layouts_validate_and_partial_redraw_is_small(self):
-        for page, labels in (('main', layout.MAIN), ('move', layout.MOVES)):
+        for page, data in layout.PAGES.items():
+            labels = data[1]
             for selected in range(len(labels)):
                 full = lcd_draw.prepare(layout.screen(page, selected))
                 partial = lcd_draw.prepare(layout.selection(page, selected, 0))
-                self.assertLess(partial['size'], full['size']/10)
+                self.assertLessEqual(partial['size'], 88)
+                self.assertLess(partial['size'], full['size']/7)
         lcd_draw.prepare(layout.message('Error', 'Long GBK ' + '\u4e2d'*100))
 
     def test_filament_design_temperature_units_and_partial_updates(self):
@@ -121,6 +124,32 @@ class DrawingTests(unittest.TestCase):
             self.assertIsNone(layout.temperature_value(value))
         self.assertEqual(layout.temperature_value(170.5), 171)
 
+    def test_information_gbk_bounds_and_mesh_projection(self):
+        lcd_draw.prepare(views.information('Info Version',
+            ['Long version '*20, '\u4e2d'*80, '\n\x7f']))
+        self.assertEqual(views.mesh_color(-.1, .1), 0x001f)
+        self.assertEqual(views.mesh_color(0., .1), 0x07e0)
+        self.assertEqual(views.mesh_color(.1, .1), 0xf800)
+        for matrix in ([[0., 0.], [0., 0.]],
+                       [[-.2, 0., .1], [-.1, .1, .2]],
+                       [[(x-y)*.02 for x in range(9)] for y in range(7)]):
+            before = [row[:] for row in matrix]
+            ops = views.mesh_screen(matrix)
+            self.assertTrue(lcd_draw.prepare_batches(ops))
+            self.assertEqual(matrix, before)
+            texts = [op[10:] for op in ops if op[0] == 3]
+            self.assertIn(b'Click: Back', texts)
+            self.assertIn(b'Bed Grid IsoMap', texts)
+        # Row zero is front Y. Positive X projects right; positive Y left.
+        flat = views.mesh_screen([[0., 0.], [0., 0.]])
+        self.assertTrue(any(op[0] == 2 for op in flat))
+        for matrix in (None, [[]], [[1., 2.]], [[1., 2.], [3.]],
+                       [[0., None], [0., 0.]],
+                       [[float('nan'), 0.], [0., 0.]],
+                       [[float('inf'), 0.], [0., 0.]]):
+            with self.assertRaises(ValueError):
+                views.mesh_screen(matrix)
+
     def test_rejects_controls_truncated_gbk_unknown_fonts_and_bounds(self):
         bad = [lcd_draw.rectangle(1, 5, 0, 4, 0),
                lcd_draw.rectangle(1, 0, 0, 240, 0),
@@ -138,6 +167,38 @@ class DrawingTests(unittest.TestCase):
             lcd_draw.prepare([])
         with self.assertRaises(ValueError):
             lcd_draw.prepare([lcd_draw.clear(0)]*6000)
+
+    def test_isomap_grid_follows_cells_without_triangle_diagonals(self):
+        ops = views.mesh_screen([[0.]*3 for unused in range(3)])
+        pixels = self.rectangle_pixels([op for op in ops if op[0] == 2])
+        # Interior measured-grid intersection, then the middle of a cell.
+        self.assertEqual(pixels[120, 198], views.GRID_COLOR)
+        self.assertEqual(pixels[120, 214], views.mesh_color(0., .05))
+        # The axes extend outside the surface and remain visible there.
+        for point in ((120, 244), (226, 209), (13, 209), (120, 152)):
+            self.assertEqual(pixels[point], views.AXIS_COLOR)
+        texts = dict((op[10:], struct.unpack('>HH', op[6:10]))
+                     for op in ops if op[0] == 3)
+        self.assertEqual(set(texts) & set((b'X', b'Y', b'Z')),
+                         set((b'X', b'Y', b'Z')))
+        self.assertEqual(texts[b'X'], (230, 203))
+        self.assertEqual(texts[b'Y'], (2, 203))
+        self.assertEqual(texts[b'Z'], (126, 136))
+
+    def test_isomap_horizontal_legend_has_symmetric_signed_labels(self):
+        ops = views.mesh_screen([[-.1, .2], [.1, 0.]])
+        pixels = self.rectangle_pixels([op for op in ops if op[0] == 2])
+        for y in range(258, 266):
+            self.assertEqual(pixels[20, y], 0x001f)
+            self.assertEqual(pixels[120, y], 0x07e0)
+            self.assertEqual(pixels[219, y], 0xf800)
+        texts = [op[10:] for op in ops if op[0] == 3]
+        self.assertIn(b'-0.20', texts)
+        self.assertIn(b'0', texts)
+        self.assertIn(b'+0.20 mm', texts)
+        # The left/right range labels remain bounded for large mesh values.
+        lcd_draw.prepare_batches(views.mesh_screen(
+            [[-100000., 100000.], [0., 0.]]))
 
 
 class MenuTests(unittest.TestCase):
@@ -179,6 +240,11 @@ class MenuTests(unittest.TestCase):
             'homed_axes': 'xyz', 'axis_minimum': [0., 0., 0.],
             'axis_maximum': [220., 220., 250.]}
         self.toolhead.manual_move.side_effect = self.move
+        self.queue_end = self.now
+        self.scheduled = []
+        self.toolhead.get_last_move_time.side_effect = lambda: self.queue_end
+        self.toolhead.check_busy.side_effect = lambda now: (
+            self.queue_end, now, self.queue_end <= now)
         self.toolhead.wait_moves.side_effect = lambda: self.log.append('drain')
         self.heater, self.bed = mock.Mock(), mock.Mock()
         self.heater.check_busy.return_value = False
@@ -196,7 +262,7 @@ class MenuTests(unittest.TestCase):
         self.now = when
 
     def render(self, ops):
-        lcd_draw.prepare(ops)
+        lcd_draw.prepare_batches(ops)
         self.operations.append(ops)
         self.lcd.screen = 'menu'
 
@@ -209,8 +275,12 @@ class MenuTests(unittest.TestCase):
         for index, value in enumerate(coord):
             if value is not None:
                 self.position[index] = value
-        self.log.append(('move', [a-b for a, b in zip(self.position, before)],
-                         speed))
+        delta = [a-b for a, b in zip(self.position, before)]
+        self.log.append(('move', delta, speed))
+        if delta[3]:
+            self.queue_end = max(self.queue_end, self.now)+abs(delta[3])/speed
+            self.scheduled.append((self.queue_end, abs(delta[3])))
+
 
     def heat(self, heater, temperature):
         self.log.append(('heat', heater, temperature))
@@ -271,7 +341,7 @@ class MenuTests(unittest.TestCase):
             self.flush()
             self.assertEqual(self.module.drawn, ('main', 1))
             self.assertEqual(self.module.get_status(self.now)['selected'],
-                             'Load Filament')
+                             'Movements')
             self.module._ccw(self.now)
             self.flush()
             self.assertEqual(self.module.drawn, ('main', 0))
@@ -535,11 +605,18 @@ class MenuTests(unittest.TestCase):
         self.assertFalse(self.operations)
 
     def test_back_and_long_press_idle_do_not_execute_an_action(self):
-        self.choose(4)
+        self.choose(1)
+        self.assertEqual(self.module.page, 'movement')
+        self.module.selected = 0
+        self.click()
         self.assertEqual(self.module.page, 'move')
         self.module.selected = 6
         self.click()
-        self.assertEqual((self.module.page, self.module.selected), ('main', 4))
+        self.assertEqual((self.module.page, self.module.selected),
+                         ('movement', 0))
+        self.module.selected = 4
+        self.click()
+        self.assertEqual((self.module.page, self.module.selected), ('main', 1))
         self.module._button(self.now, True)
         self.now += .03
         self.module._debounced(self.now)
@@ -571,7 +648,7 @@ class MenuTests(unittest.TestCase):
         self.gcode.run_script_from_command.assert_called_once_with('G28')
 
     def test_successful_home_preheat_and_moves_send_no_lcd_traffic(self):
-        for page, selected in [('main', 0), ('main', 3)] + [
+        for page, selected in [('main', 0), ('filament', 2)] + [
                 ('move', index) for index in range(6)]:
             self.open()
             self.module.page, self.module.selected = page, selected
@@ -594,13 +671,13 @@ class MenuTests(unittest.TestCase):
 
     def test_changing_pages_only_replaces_body(self):
         self.open()
-        self.module.selected = 4
+        self.module.selected = 1
         self.click()
         ops = self.operations[-1]
         self.assertNotIn(1, [op[0] for op in ops])
         self.assertFalse(any(op[10:] in (b'K', b'lipper') for op in ops
                              if op[0] == 3))
-        self.module.selected = 6
+        self.module.selected = 4
         self.click()
         self.assertNotIn(1, [op[0] for op in self.operations[-1]])
 
@@ -613,10 +690,139 @@ class MenuTests(unittest.TestCase):
         self.lcd.render_drawing.assert_not_called()
 
     def test_preheat_only_sets_requested_targets(self):
-        self.choose(3)
+        self.choose(2, 'filament')
         self.heaters.set_temperature.assert_has_calls([
             mock.call(self.heater, 170.), mock.call(self.bed, 50.)])
         self.toolhead.manual_move.assert_not_called()
+
+    def test_nested_pages_and_back_restore_parent_selection(self):
+        for parent, data in layout.PAGES.items():
+            for selected, action in enumerate(data[2]):
+                if not action.startswith('page:'):
+                    continue
+                self.choose(selected, parent)
+                child = action.split(':')[1]
+                self.assertEqual(self.module.page, child)
+                self.module.selected = layout.PAGES[child][2].index('back')
+                self.click()
+                self.assertEqual((self.module.page, self.module.selected),
+                                 (parent, selected))
+        self.gcode.run_script_from_command.assert_not_called()
+
+    def test_disable_probe_and_cooldown_use_configured_commands(self):
+        self.objects['bltouch'] = mock.Mock()
+        for page, index, command in (
+                ('movement', 1, 'M84'),
+                ('movement', 2, 'BLTOUCH_DEBUG COMMAND=pin_down'),
+                ('movement', 3, 'BLTOUCH_DEBUG COMMAND=pin_up'),
+                ('filament', 3, 'TURN_OFF_HEATERS')):
+            self.choose(index, page)
+            self.gcode.run_script_from_command.assert_called_with(command)
+            self.lcd.render_drawing.reset_mock()
+            self.click()
+            self.lcd.render_drawing.assert_not_called()
+
+    def test_autooffset_dispatches_only_the_configured_method(self):
+        for index, method in enumerate(('cr', 'ft')):
+            self.objects['auto_z_offset_'+method] = mock.Mock()
+            self.choose(index, 'autooffset')
+            self.gcode.run_script_from_command.assert_called_with(
+                'AUTO_Z_OFFSET')
+            del self.objects['auto_z_offset_'+method]
+            self.gcode.run_script_from_command.reset_mock()
+            with self.assertLogs(level='WARNING'):
+                self.choose(index, 'autooffset')
+            self.gcode.run_script_from_command.assert_not_called()
+            self.assertIn('[auto_z_offset_%s]' % method, self.module.error)
+            self.click()
+
+    def test_level_homes_then_runs_mesh_command_and_rechecks_state(self):
+        self.objects['bed_mesh'] = mock.Mock()
+        self.choose(1, 'tune')
+        self.assertEqual(self.gcode.run_script_from_command.call_args_list,
+                         [mock.call('G28'), mock.call('BED_MESH_CALIBRATE')])
+        def run(script):
+            if script == 'G28':
+                self.sd.preflight_pending = True
+        self.gcode.run_script_from_command.reset_mock()
+        self.gcode.run_script_from_command.side_effect = run
+        with self.assertLogs(level='WARNING'):
+            self.choose(1, 'tune')
+        self.gcode.run_script_from_command.assert_called_once_with('G28')
+
+    def test_calibration_result_click_returns_without_repeating_command(self):
+        self.objects['auto_z_offset_cr'] = mock.Mock()
+        def run(script):
+            self.assertEqual(script, 'AUTO_Z_OFFSET')
+            self.module._invalidate()
+            self.lcd.screen = 'calibration_result'
+        self.gcode.run_script_from_command.side_effect = run
+        self.choose(0, 'autooffset')
+        self.assertEqual(self.module.view, 'calibration')
+        self.assertEqual(self.lcd.screen, 'calibration_result')
+        self.click()
+        self.assertIsNone(self.module.view)
+        self.assertEqual(self.module.drawn, ('autooffset', 0))
+        self.gcode.run_script_from_command.assert_called_once_with(
+            'AUTO_Z_OFFSET')
+        def reset(script):
+            run(script)
+            self.module._invalidate()
+        self.gcode.run_script_from_command.side_effect = reset
+        self.click()
+        self.assertFalse(self.module.is_active())
+
+    def test_rejected_calibration_keeps_result_until_click(self):
+        self.objects['auto_z_offset_ft'] = mock.Mock()
+        def run(script):
+            self.module._invalidate()
+            self.lcd.screen = 'calibration_result'
+            raise RuntimeError('Contact rejected')
+        self.gcode.run_script_from_command.side_effect = run
+        with self.assertLogs(level='WARNING'):
+            self.choose(1, 'autooffset')
+        self.assertEqual(self.module.view, 'calibration')
+        self.assertEqual(self.module.error, 'Contact rejected')
+        self.click()
+        self.assertEqual(self.module.drawn, ('autooffset', 1))
+        self.assertIsNone(self.module.view)
+        self.assertIsNone(self.module.error)
+        self.gcode.run_script_from_command.assert_called_once_with(
+            'AUTO_Z_OFFSET')
+
+    def test_info_views_are_static_and_click_returns_to_menu(self):
+        for index, expected in ((0, b'MCU firmware:'),
+                                (1, b'Ender-3 V3 SE'),
+                                (2, b'github.com/navaismo/klipper')):
+            self.choose(index, 'info')
+            texts = [op[10:] for op in self.operations[-1] if op[0] == 3]
+            self.assertIn(expected, texts)
+            self.lcd.render_drawing.reset_mock()
+            self.module._cw(self.now)
+            self.flush()
+            self.lcd.render_drawing.assert_not_called()
+            self.click()
+            self.assertIsNone(self.module.view)
+            self.assertEqual(self.module.drawn, ('info', index))
+        self.gcode.run_script_from_command.assert_not_called()
+        self.heaters.set_temperature.assert_not_called()
+        self.toolhead.manual_move.assert_not_called()
+
+    def test_mesh_reads_active_snapshot_without_moving_or_changing_mesh(self):
+        mesh = self.objects['bed_mesh'] = mock.Mock()
+        mesh.get_mesh.return_value.get_probed_matrix.return_value = [
+            [-.1, .2], [.1, 0.]]
+        self.choose(2, 'tune')
+        self.assertEqual(self.module.view, 'mesh')
+        mesh.get_mesh.return_value.get_probed_matrix.assert_called_once()
+        self.gcode.run_script_from_command.assert_not_called()
+        self.toolhead.manual_move.assert_not_called()
+        self.click()
+        self.assertEqual(self.module.drawn, ('tune', 2))
+        mesh.get_mesh.return_value = None
+        with self.assertLogs(level='WARNING'):
+            self.click()
+        self.assertIn('No active bed mesh', self.module.error)
 
     def test_each_axis_moves_ten_mm_with_correct_sign(self):
         for selected, axis, sign in ((0, 2, 1), (1, 2, -1), (2, 0, -1),
@@ -642,7 +848,7 @@ class MenuTests(unittest.TestCase):
             self.assertIsNone(self.module.error)
 
     def check_filament(self, index, expected):
-        self.choose(index)
+        self.choose(index, 'filament')
         moves = [e for e in self.log if isinstance(e, tuple) and e[0] == 'move']
         grouped = []
         for unused, delta, speed in moves:
@@ -666,8 +872,31 @@ class MenuTests(unittest.TestCase):
         self.check_filament(1, [[(800./60., True), 50.],
                                 [(400./60., True), 40.]])
 
+    def test_filament_refills_while_previous_segment_is_still_scheduled(self):
+        original = self.toolhead.manual_move.side_effect
+        queued = []
+        def move(coord, speed):
+            if coord[3] is not None:
+                queued.append(sum(length for end, length in self.scheduled
+                                  if end > self.now))
+            original(coord, speed)
+        self.toolhead.manual_move.side_effect = move
+        self.choose(1, 'filament')
+        self.assertTrue(all(.0 < distance <= .5 for distance in queued[2:]))
+        self.assertEqual(self.position[3], 90.)
+
+    def test_invalidation_while_streaming_queues_no_more_extrusion(self):
+        def pause(when):
+            self.now = when
+            self.module._invalidate()
+        self.reactor.pause.side_effect = pause
+        with self.assertLogs(level='WARNING'):
+            self.choose(1, 'filament')
+        self.assertEqual(self.position[3], 1.)
+        self.heaters.set_temperature.assert_called_with(self.heater, 0.)
+
     def test_unload_purges_then_retracts_at_requested_speeds(self):
-        self.check_filament(2, [[(400./60., True), 15.],
+        self.check_filament(0, [[(400./60., True), 15.],
                                 [(800./60., False), -90.]])
 
     def test_extrusion_waits_for_heating_and_drops_knob_events(self):
@@ -676,14 +905,14 @@ class MenuTests(unittest.TestCase):
             self.module._activate(eventtime)
             return eventtime < 11.
         self.heater.check_busy.side_effect = busy
-        self.choose(1)
+        self.choose(1, 'filament')
         self.assertGreaterEqual(self.now, 11.)
         self.assertEqual(self.module.selected, 1)
 
     def test_heating_timeout_and_invalidated_wait_turn_heater_off(self):
         self.heater.check_busy.return_value = True
         with self.assertLogs(level='WARNING'):
-            self.choose(1)
+            self.choose(1, 'filament')
         self.toolhead.manual_move.assert_not_called()
         self.heaters.set_temperature.assert_called_with(self.heater, 0.)
         self.assertIn('timed out', self.module.error)
@@ -693,14 +922,14 @@ class MenuTests(unittest.TestCase):
             self.module._invalidate()
         self.reactor.pause.side_effect = invalidate
         with self.assertLogs(level='WARNING'):
-            self.choose(1)
+            self.choose(1, 'filament')
         self.toolhead.manual_move.assert_not_called()
         self.heaters.set_temperature.assert_called_with(self.heater, 0.)
 
     def test_motion_error_restores_gcode_and_turns_off_heater(self):
         self.toolhead.manual_move.side_effect = RuntimeError('Extrude limit')
         with self.assertLogs(level='WARNING'):
-            self.choose(1)
+            self.choose(1, 'filament')
         self.heaters.set_temperature.assert_called_with(self.heater, 0.)
         self.gcode.run_script_from_command.assert_called_with(
             'RESTORE_GCODE_STATE NAME=tjc_menu')
@@ -718,12 +947,12 @@ class MenuTests(unittest.TestCase):
             self.now = when
             self.cancel_press()
         self.reactor.pause.side_effect = pause
-        self.choose(1)
+        self.choose(1, 'filament')
         self.toolhead.manual_move.assert_not_called()
         self.gcode.run_script_from_command.assert_not_called()
         self.heaters.set_temperature.assert_has_calls([
             mock.call(self.heater, 240.), mock.call(self.heater, 0.)])
-        self.assertEqual(self.module.drawn, ('main', 1))
+        self.assertEqual(self.module.drawn, ('main', 2))
         self.assertFalse(self.module.busy)
         self.assertIsNone(self.module.error)
         self.assertIsNone(self.module.filament_action)
@@ -742,7 +971,7 @@ class MenuTests(unittest.TestCase):
                 self.assertTrue(self.module.cancel_requested)
                 self.lcd.state = 'ready'
         self.lcd.render_drawing.side_effect = render
-        self.choose(2)
+        self.choose(0, 'filament')
         self.heaters.set_temperature.assert_called_once_with(self.heater, 0.)
         self.toolhead.manual_move.assert_not_called()
         self.gcode.run_script_from_command.assert_not_called()
@@ -750,37 +979,34 @@ class MenuTests(unittest.TestCase):
 
     def cancel_after_moves(self, selected, count):
         cancelled = []
-        def drain():
-            self.log.append('drain')
-            moves = [entry for entry in self.log if isinstance(entry, tuple)
-                     and entry[0] == 'move']
-            if len(moves) == count and not cancelled:
-                cancelled.append(True)
+        def pause(when):
+            self.now = when
+            if self.toolhead.manual_move.call_count >= count and not cancelled:
+                cancelled.append(self.toolhead.manual_move.call_count)
                 self.cancel_press()
-        self.toolhead.wait_moves.side_effect = drain
-        self.choose(selected)
-        moves = [entry for entry in self.log if isinstance(entry, tuple)
-                 and entry[0] == 'move']
-        self.assertEqual(len(moves), count)
-        indices = [index for index, entry in enumerate(self.log)
-                   if isinstance(entry, tuple) and entry[0] == 'move']
-        for start, end in zip(indices, indices[1:]):
-            self.assertIn('drain', self.log[start+1:end])
+        self.reactor.pause.side_effect = pause
+        self.choose(selected, 'filament')
+        self.assertEqual(self.toolhead.manual_move.call_count, cancelled[0])
+        # Every in-flight segment counts, even across purge/retract reversal.
+        outstanding = sum(length for end, length in self.scheduled
+                          if end > self.now-.03)
+        self.assertLessEqual(outstanding, 1.)
         self.heaters.set_temperature.assert_called_with(self.heater, 0.)
         self.gcode.run_script_from_command.assert_called_with(
             'RESTORE_GCODE_STATE NAME=tjc_menu')
-        self.assertEqual(self.module.drawn, ('main', selected))
+        self.assertEqual(self.module.drawn, ('main', 2))
         self.assertIsNone(self.module.error)
-        return moves
+        return [entry for entry in self.log if isinstance(entry, tuple)
+                and entry[0] == 'move']
 
     def test_cancel_loading_never_queues_more_than_one_mm(self):
-        moves = self.cancel_after_moves(1, 2)
+        moves = self.cancel_after_moves(1, 4)
         self.assertEqual(sum(entry[1][3] for entry in moves), 2.)
 
     def test_cancel_unloading_preserves_purge_and_stops_retracting(self):
-        moves = self.cancel_after_moves(2, 17)
-        self.assertEqual(sum(entry[1][3] for entry in moves[:15]), 15.)
-        self.assertEqual(sum(entry[1][3] for entry in moves[15:]), -2.)
+        moves = self.cancel_after_moves(0, 34)
+        self.assertEqual(sum(entry[1][3] for entry in moves[:30]), 15.)
+        self.assertEqual(sum(entry[1][3] for entry in moves[30:]), -2.)
 
     def test_cancel_bounce_and_stale_press_do_not_cancel_heating(self):
         self.heater.check_busy.side_effect = lambda et: et < 11.
@@ -792,39 +1018,40 @@ class MenuTests(unittest.TestCase):
             self.now += .03
             self.module._debounced(self.now)
         self.reactor.pause.side_effect = pause
-        self.choose(1)
+        self.choose(1, 'filament')
         self.assertEqual(self.position[3], 90.)
         self.assertIsNone(self.module.error)
 
-    def test_temperature_refresh_is_partial_once_per_second_and_stops(self):
+    def test_temperature_updates_only_while_heating_then_screen_is_static(self):
         started = self.now
         self.heater.check_busy.side_effect = lambda et: et < started+3.4
         self.heater.get_temp.side_effect = lambda et: (
-            25.+int((et-started)*10.), 240.)
+            min(240., 25.+(et-started)*65.), 240.)
         readings = []
-        drained = []
-        def drain():
-            self.log.append('drain')
-            count = self.toolhead.manual_move.call_count
-            if count > len(drained):
-                drained.append(count)
-                self.now += .2
-        self.toolhead.wait_moves.side_effect = drain
         def render(ops):
             self.render(ops)
             if any(op[0] == 3 and op[10:].startswith(b'Nozzle:')
                    for op in ops):
                 readings.append((self.now, ops))
+            if self.toolhead.manual_move.call_count:
+                # The only draw after extrusion is the restored menu.
+                self.assertIn(b'Filament', [op[10:] for op in ops
+                                           if op[0] == 3])
         self.lcd.render_drawing.side_effect = render
-        self.choose(1)
-        self.assertGreaterEqual(len(readings), 3)
-        for when, ops in readings[1:]:
-            self.assertNotIn(1, [op[0] for op in ops])
-        heating = [when for when, ops in readings if when < started+3.4]
-        times = [when for when, ops in readings]
-        for before, after in zip(times, times[1:]):
-            self.assertGreaterEqual(after-before, 1.)
-        self.assertGreater(len(readings), len(heating)+1)
+        self.choose(1, 'filament')
+        self.assertGreaterEqual(len(readings), 4)
+        heating = [(when, ops) for when, ops in readings
+                   if when < started+3.4]
+        for before, after in zip(heating, heating[1:]):
+            self.assertGreaterEqual(after[0]-before[0], 1.)
+        self.assertIn(b'Nozzle: 240 C',
+                      [op[10:] for op in readings[-1][1] if op[0] == 3])
+        self.assertGreater(self.now, started+9.)
+        moves = [i for i, entry in enumerate(self.log)
+                 if isinstance(entry, tuple) and entry[0] == 'move']
+        self.assertFalse(any(entry == 'drain'
+                             for entry in self.log[moves[0]:moves[-1]]))
+        self.assertLess(self.toolhead.wait_moves.call_count, 10)
         before = len(readings)
         self.now += 100.
         self.stats.get_status.return_value = {'state': 'printing'}
@@ -838,7 +1065,7 @@ class MenuTests(unittest.TestCase):
             self.sd.preflight_pending = True
         self.reactor.pause.side_effect = pause
         with self.assertLogs(level='WARNING'):
-            self.choose(1)
+            self.choose(1, 'filament')
         self.assertEqual(len(self.operations), 3)
         self.toolhead.manual_move.assert_not_called()
         self.heaters.set_temperature.assert_called_with(self.heater, 0.)
@@ -866,7 +1093,7 @@ class MenuTests(unittest.TestCase):
                 self.module._invalidate()
         self.lcd.render_drawing.side_effect = render
         with self.assertLogs(level='WARNING'):
-            self.choose(1)
+            self.choose(1, 'filament')
         self.toolhead.manual_move.assert_not_called()
         self.gcode.run_script_from_command.assert_not_called()
         self.heaters.set_temperature.assert_called_with(self.heater, 0.)
@@ -926,7 +1153,7 @@ class MenuTests(unittest.TestCase):
                 state.cmd_RESTORE_GCODE_STATE(command)
         self.gcode.run_script_from_command.side_effect = script
         before = (state.last_position[3]-state.base_position[3])/1.3
-        self.choose(1)
+        self.choose(1, 'filament')
         self.assertEqual(state.speed_factor, .5/60.)
         self.assertEqual(state.extrude_factor, 1.3)
         self.assertEqual(state.speed, 57.)
@@ -964,6 +1191,17 @@ class DrawingTransportTests(unittest.TestCase):
         self.assertFalse(self.module.rendered)
         self.commands[2].send.assert_called_once()
         self.commands[3].send.assert_not_called()
+
+    def test_large_drawing_batches_and_late_invalid_operation(self):
+        ops = [lcd_draw.text('Mesh', 0, 0)]*1300
+        expected = lcd_draw.prepare_batches(ops)
+        self.assertGreater(len(expected), 1)
+        self.module.render_drawing(ops)
+        self.assertEqual(self.commands[2].send.call_count, len(expected))
+        self.commands[0].send.reset_mock()
+        with self.assertRaises(ValueError):
+            self.module.render_drawing(ops+[b'bad'])
+        self.commands[0].send.assert_not_called()
 
     def test_calibration_reuses_menu_firmware_for_partial_updates(self):
         self.assertIsNone(self.module.canvas_begin_cmd)
