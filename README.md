@@ -36,14 +36,29 @@ opening an LCD serial port.
 
 ## On my printer
 
-Here are the idle screen, menus and two print cards on my printer. The menu
-photos show the earlier layout; the current hierarchy is listed below.
+Here's how the LCD looks on my printer. The menu and IsoMap photos are from
+November 17, 2026, arranged in menu order.
 
-<img src="Screenshots/IdleV7.jpg" alt="Idle screen with Klipper branding and MCU firmware revision and build date" width="300">
-
-| Main menu | Movement submenu |
+| Idle screen | Klipper Menu |
 | --- | --- |
-| <img src="Screenshots/Menu1.jpg" alt="Main knob menu with Home, Load, Unload, Preheat, More Moves and hold-to-idle hint" width="300"> | <img src="Screenshots/Menu2.jpg" alt="Movement submenu with six 10 mm XYZ actions and Back" width="300"> |
+| <img src="Screenshots/IdleV7.jpg" alt="Idle screen with Klipper branding and MCU firmware revision and build date" width="300"> | <img src="Screenshots/LCDMenus/2026-11-17/01-main-menu.jpg" alt="Klipper Menu with Homing XYZ, Movements, Filament, Tune and Info" width="300"> |
+
+| Movements | Move XYZ |
+| --- | --- |
+| <img src="Screenshots/LCDMenus/2026-11-17/02-movements.jpg" alt="Movements submenu with Move XYZ, Disable Motors, Deploy Probe and Stow Probe" width="300"> | <img src="Screenshots/LCDMenus/2026-11-17/03-move-xyz.jpg" alt="Move XYZ submenu with six 10 mm movements and Back" width="300"> |
+
+| Filament | Tune |
+| --- | --- |
+| <img src="Screenshots/LCDMenus/2026-11-17/04-filament.jpg" alt="Filament submenu with Unload, Load, Preheat and Cooldown" width="300"> | <img src="Screenshots/LCDMenus/2026-11-17/05-tune.jpg" alt="Tune submenu with Start Autooffset, Start Bed Level and View Bed Grid IsoMap" width="300"> |
+
+The Bed Grid IsoMap shows the measured surface with cell outlines, labeled
+X/Y/Z axes and a horizontal heat scale.
+
+<img src="Screenshots/LCDMenus/2026-11-17/06-bed-grid-isomap.jpg" alt="Physical LCD showing a 5x5 bed mesh with grid lines, X Y Z axes and a horizontal blue-to-red heat scale" width="400">
+
+| Info Version | Info Printer | Info GitHub |
+| --- | --- | --- |
+| <img src="Screenshots/LCDMenus/2026-11-17/07-info-version.jpg" alt="Info Version screen showing the connected MCU firmware and Klippy revisions" width="240"> | <img src="Screenshots/LCDMenus/2026-11-17/08-info-printer.jpg" alt="Info Printer screen showing the Ender-3 V3 SE model, homed axes and XYZ travel limits" width="240"> | <img src="Screenshots/LCDMenus/2026-11-17/09-info-github.jpg" alt="Info GitHub screen with the fork and upstream repository addresses" width="240"> |
 
 | Print card: skull case | Print card: slingshot |
 | --- | --- |

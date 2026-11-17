@@ -9,6 +9,14 @@ is superseded by the owner-approved work below.
 
 ## Nested menu and static filament motion screen (2026-11-17)
 
+Physical photos of the nested menus, info pages and the completed IsoMap are
+in `Screenshots/LCDMenus/2026-11-17/`, numbered in menu order with descriptive
+names. The [README gallery](../README.md#on-my-printer) shows these alongside
+the idle screen and print cards. The IsoMap photo shows the measured-cell
+grid, X/Y/Z labels and horizontal heat scale on the panel. These photos
+confirm appearance; they do not establish calibration accuracy or filament
+motion smoothness. Earlier menu photos remain historical references.
+
 The host menu now groups Homing XYZ, Movements, Filament, Tune and Info.
 `tjc_menu_layout.py` defines every page, parent, label, icon and action;
 `tjc_menu_views.py` prepares static info pages and the IsoMap. Existing

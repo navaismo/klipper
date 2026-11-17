@@ -4,8 +4,8 @@ This guide installs the fork's current LCD setup: an idle screen with MCU
 firmware identification, knob menus, filament controls, and a static print
 card with a 120x120 displayed thumbnail. The
 [hardware photos](../README.md#on-my-printer) show the original
-STM32F103RET6/TJC3224T1 setup and the earlier menu layout. The nested menu
-and IsoMap described here still need physical display validation.
+STM32F103RET6/TJC3224T1 setup, including the nested menus and the IsoMap
+with grid lines, labeled axes and a horizontal heat scale.
 
 Use an existing working Klipper, Moonraker and Fluidd installation. Keep
 the printer's calibrated motor, sensor, heater and macro configuration.

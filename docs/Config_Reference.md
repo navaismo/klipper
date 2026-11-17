@@ -5189,8 +5189,9 @@ Large drawings use bounded generic batches without an MCU firmware update.
 
 An operation error is shown once; click to dismiss or rotate to navigate
 again. Printer actions and drawing are serialized with G-code execution.
-The earlier screen layouts and corrected Y direction were tested on this
-printer. The nested pages and IsoMap still need physical validation.
+The nested menus and IsoMap appearance are shown in the November 17
+[hardware photos](../README.md#on-my-printer). The corrected Y direction
+was tested on this printer.
 Verify printer-specific homing macros, travel and extrusion settings before
 using actions on another installation. See the
 [setup guide](TJC_LCD_Setup.md) for commands, status, troubleshooting and
