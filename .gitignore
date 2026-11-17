@@ -78,6 +78,13 @@ Thumbs.db
 !/Screenshots/autoz_s1.jpg
 !/Screenshots/autoz_s2.jpg
 !/Screenshots/autoz_s3.jpg
+
+# Physical LCD menu photos, grouped by capture date.
+!/Screenshots/LCDMenus/
+/Screenshots/LCDMenus/*
+!/Screenshots/LCDMenus/2026-11-17/
+/Screenshots/LCDMenus/2026-11-17/*
+!/Screenshots/LCDMenus/2026-11-17/*.jpg
 auto_z_dual_estimator_dev.zip
 shaper_calibrate_x.png
 shaper_calibrate_Y.png

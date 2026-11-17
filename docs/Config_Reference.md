@@ -5099,9 +5099,10 @@ without executing an action. Once inside, clockwise rotation highlights
 the next entry down; counterclockwise rotation highlights the previous
 entry up. Click to enter a submenu or execute the highlighted action.
 A click while idle does not open the menu. Hold the knob for 0.8
-seconds to return to idle. More Moves opens six 10 mm movements and Back.
-The main menu's footer reads `Press&Hold Knob: Idle Screen`.
-Section headings are not selectable. Navigation is discarded while an
+seconds to return to idle. Movements > Move XYZ opens six 10 mm movements.
+The main menu is titled `Klipper Menu`, with Homing XYZ, Movements,
+Filament, Tune and Info. Each submenu has Back. The footer reads
+`Press&Hold Knob: Idle Screen`. Back restores the parent selection. Navigation is discarded while an
 action or drawing is busy. A filament cancel press is accepted as described
 below. Navigation draws have a fixed 200 ms cooldown after completion.
 Fast rotation updates one pending selection redraw; intermediate highlights
@@ -5120,7 +5121,7 @@ on errors. Resume through the usual host UI.
 A new print closes the menu before its job card is rendered.
 The print card remains static.
 
-Home All Axes uses the configured `G28` command, including overrides.
+Homing XYZ uses the configured `G28` command, including overrides.
 Preheat sets bed 50 C and nozzle 170 C without waiting. Movement entries
 execute exactly 10 mm per click at 20 mm/s for XY and 2 mm/s for Z, subject
 to normal kinematic limits. They require homed axes and an in-range full
@@ -5139,8 +5140,9 @@ Load and Unload heat the active extruder to 240 C and wait, with a
 five-minute heating deadline. Load feeds 50 mm at F800 followed by 40 mm
 at F400. Unload purges 15 mm at F400 and retracts 90 mm at F800. Feedrates
 are mm/min, independent of G-code speed/flow overrides. Moves are split
-into at most 1 mm segments, waiting for each to finish before queuing the
-next; normal extrusion limits still apply and can reject a segment.
+into 0.5 mm segments, with at most 1 mm outstanding. The host refills the
+queue using MCU print-time estimates without draining after every segment;
+normal extrusion limits still apply and can reject a segment.
 The bed is unchanged. The nozzle target is set to zero
 after queued extrusion finishes, including cleanup after recoverable
 errors. G-code modes and extrusion coordinates are restored without
@@ -5150,8 +5152,9 @@ The host-designed Load/Unload screen follows
 [load_unload.png](../Screenshots/load_unload.png) and displays current
 nozzle temperature, the operation state, and `Press to cancel`. The full
 artwork is sent once before heating. Changed temperature values refresh
-at most once per second during heating and extrusion; phase changes update
-immediately. Only the changed temperature/state regions are redrawn.
+at most once per second during heating. A final temperature/phase update
+finishes before extrusion; no LCD traffic occurs during loading/retraction.
+Only the changed temperature/state regions are redrawn while heating.
 There is no timer that continues refreshing outside the operation.
 
 A stable knob press cancels during heating, drawing, or extrusion, without
@@ -5164,11 +5167,33 @@ without an error. The release cannot activate another action. The new
 artwork/temperature/cancel behavior is host-only and needs no additional
 MCU update beyond `TJC_DRAW_VERSION=1`.
 
+Movements also provides Disable Motors (`M84`) and Deploy/Stow Probe
+(`BLTOUCH_DEBUG COMMAND=pin_down`/`pin_up`, requiring `[bltouch]`). Filament
+contains Unload, Load, Preheat and Cooldown (`TURN_OFF_HEATERS`).
+Tune provides Start Autooffset > Contact Regression (CR)/Force Trigger (FT),
+Start Bed Level and View Bed Grid IsoMap. Autooffset runs `AUTO_Z_OFFSET`
+only when the matching `[auto_z_offset_cr]` or `[auto_z_offset_ft]` module is
+configured. Only one module can be enabled; the menu does not change that
+selection or save/accept an offset. A completed calibration phase screen
+returns to the Autooffset submenu on click. Bed Level requires `[bed_mesh]`, runs
+`G28`, then the configured `BED_MESH_CALIBRATE`, without automatic saving.
+
+IsoMap displays the active probed matrix (2..64 points per axis), using
+Marlin's isometric projection, a zero-centered blue-to-red palette and
+host-only triangulation. Min/max/range remain the actual mesh values in mm;
+height exaggeration is visual only. Missing/nonfinite points reject the view.
+Info provides connected MCU/Klippy versions, printer travel/homing information
+and GitHub addresses. These views are static; click returns to the same
+menu selection, and rotations do nothing. They cause no probing or heating.
+Large drawings use bounded generic batches without an MCU firmware update.
+
 An operation error is shown once; click to dismiss or rotate to navigate
 again. Printer actions and drawing are serialized with G-code execution.
-The owner confirmed the current appearance and corrected Y direction on
-this printer. Verify printer-specific homing macros, travel and extrusion
-settings before using actions on another installation. See the
+The nested menus and IsoMap appearance are shown in the November 17
+[hardware photos](../README.md#on-my-printer). The corrected Y direction
+was tested on this printer.
+Verify printer-specific homing macros, travel and extrusion settings before
+using actions on another installation. See the
 [setup guide](TJC_LCD_Setup.md) for commands, status, troubleshooting and
 rollback, or [sample-tjc-menu.cfg](../config/sample-tjc-menu.cfg) to add
 only the menu to an existing LCD configuration. Do not include both samples.

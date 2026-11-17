@@ -4,8 +4,10 @@
 import logging
 try:
     from . import tjc_menu_layout as layout
+    from . import tjc_menu_views as views
 except ImportError:
     import tjc_menu_layout as layout
+    import tjc_menu_views as views
 
 NAVIGATION_INTERVAL = .200
 
@@ -36,6 +38,7 @@ class TJCMenu:
         self.redraw_request = None
         self.next_redraw = 0.
         self.drawn = None
+        self.view = None
         self.error = None
         self.ignore_before = 0.
         self.physical = self.pressed = False
@@ -74,6 +77,7 @@ class TJCMenu:
         self.generation += 1
         self.page = None
         self.drawn = None
+        self.view = None
         self.pending = False
         self.redraw_request = None
         self.next_redraw = 0.
@@ -107,7 +111,9 @@ class TJCMenu:
             self.page, self.selected = 'main', 0
             self.drawn = None
         else:
-            count = len(layout.MAIN if self.page == 'main' else layout.MOVES)
+            if self.view is not None:
+                return
+            count = len(layout.PAGES[self.page][1])
             self.selected = (self.selected+delta) % count
         self.error = None
         self._queue_redraw()
@@ -256,19 +262,23 @@ class TJCMenu:
     def _activate(self, eventtime):
         if not self._input(eventtime) or self.pending or not self.is_active():
             return
+        if self.view is not None:
+            self.view = None
+            self.error = None
+            self.drawn = None
+            self._queue_redraw()
+            return
         if self.error is not None:
             self.error = None
             self.drawn = None
             self._queue_redraw()
             return
-        if self.page == 'main':
-            action = ('home', 'load', 'unload', 'preheat',
-                      'moves')[self.selected]
-        else:
-            action = ('z+', 'z-', 'x-', 'x+', 'y+', 'y-', 'back')[self.selected]
-        if action in ('moves', 'back'):
-            self.page = 'move' if action == 'moves' else 'main'
-            self.selected = 0 if action == 'moves' else 4
+        action = layout.PAGES[self.page][2][self.selected]
+        if action.startswith('page:') or action == 'back':
+            if action == 'back':
+                self.page, self.selected = layout.PARENTS[self.page]
+            else:
+                self.page, self.selected = action.split(':', 1)[1], 0
             self._queue_redraw()
         else:
             self._queue_action(action)
@@ -337,6 +347,44 @@ class TJCMenu:
             except Exception:
                 heaters.set_temperature(nozzle, 0.)
                 raise
+        elif action == 'cooldown':
+            self.gcode.run_script_from_command('TURN_OFF_HEATERS')
+        elif action == 'disable':
+            self.gcode.run_script_from_command('M84')
+        elif action in ('deploy', 'stow'):
+            if self.printer.lookup_object('bltouch', None) is None:
+                raise self.gcode.error(
+                    'A configured BLTouch/CR Touch is needed')
+            self.gcode.run_script_from_command('BLTOUCH_DEBUG COMMAND='
+                + ('pin_down' if action == 'deploy' else 'pin_up'))
+        elif action.startswith('auto:'):
+            method = action.split(':', 1)[1]
+            backend = self.printer.lookup_object('auto_z_offset_'+method, None)
+            if backend is None:
+                raise self.gcode.error(
+                    'Enable [auto_z_offset_%s] and reload Klipper first; '
+                    'configure only one Autooffset method' % method)
+            # The calibration owns its LCD phase view and all safety checks.
+            try:
+                self.gcode.run_script_from_command('AUTO_Z_OFFSET')
+            finally:
+                # begin_calibration invalidates the old menu once. Adopt its
+                # finished result only; extra resets or a new job exclude it.
+                if (self.generation == token+1 and self._allowed()
+                    and self.lcd.screen == 'calibration_result'):
+                    self.page, self.selected = 'autooffset', int(method == 'ft')
+                    self.view = 'calibration'
+                    self.drawn = None
+        elif action == 'level':
+            if self.printer.lookup_object('bed_mesh', None) is None:
+                raise self.gcode.error('A configured [bed_mesh] is needed')
+            self.gcode.run_script_from_command('G28')
+            toolhead.wait_moves()
+            self._check_action(token)
+            self.gcode.run_script_from_command('BED_MESH_CALIBRATE')
+            toolhead.wait_moves()
+        elif action == 'mesh' or action.startswith('view:'):
+            self._show_view(action)
         else:
             index = 'xyz'.index(action[0])
             status = toolhead.get_status(self.reactor.monotonic())
@@ -353,6 +401,40 @@ class TJCMenu:
             coord[index] = destination
             toolhead.manual_move(coord, 2. if index == 2 else 20.)
             toolhead.wait_moves()
+
+    def _show_view(self, action):
+        now = self.reactor.monotonic()
+        if action == 'mesh':
+            bed_mesh = self.printer.lookup_object('bed_mesh', None)
+            mesh = bed_mesh.get_mesh() if bed_mesh is not None else None
+            if mesh is None:
+                raise self.gcode.error(
+                    'No active bed mesh; run Bed Level first')
+            ops = views.mesh_screen(mesh.get_probed_matrix())
+        else:
+            name = action.split(':', 1)[1]
+            if name == 'version':
+                version = self.lcd.mcu.get_status(now).get(
+                    'mcu_version', 'unknown')
+                host = self.printer.get_start_args().get(
+                    'software_version', 'unknown')
+                ops = views.information('Info Version',
+                    ['MCU firmware:', version, '', 'Klippy:', host])
+            elif name == 'printer':
+                status = self.printer.lookup_object('toolhead').get_status(now)
+                lines = ['Ender-3 V3 SE', 'Homed: '
+                         + (status['homed_axes'].upper() or 'none')]
+                for index, axis in enumerate('XYZ'):
+                    lines.append('%s: %.1f .. %.1f mm' % (axis,
+                        status['axis_minimum'][index],
+                        status['axis_maximum'][index]))
+                ops = views.information('Info Printer', lines)
+            else:
+                ops = views.information('Info GitHub',
+                    ['Fork:', 'github.com/navaismo/klipper', '',
+                     'Upstream:', 'github.com/Klipper3d/klipper'])
+        self.lcd.render_drawing(ops)
+        self.view = action
 
     def _filament(self, action, token):
         toolhead = self.printer.lookup_object('toolhead')
@@ -385,21 +467,7 @@ class TJCMenu:
             saved = True
             sequence = ((50., 800.), (40., 400.)) if action == 'load' else (
                 (15., 400.), (-90., 800.))
-            for distance, feedrate in sequence:
-                while abs(distance) > .000001:
-                    self._check_filament(token)
-                    step = min(abs(distance), 1.)
-                    if distance < 0.:
-                        step = -step
-                    target = toolhead.get_position()[3]+step
-                    toolhead.manual_move([None, None, None, target],
-                                         feedrate/60.)
-                    distance -= step
-                    # Do not queue the entire operation ahead of a cancel.
-                    # Only this <=1 mm move can remain after the knob press.
-                    toolhead.wait_moves()
-                    self._check_filament(token)
-                    self._update_filament(heater, detail, token)
+            self._extrude_filament(toolhead, sequence, token)
             toolhead.wait_moves()
         except FilamentCancelled:
             cancelled = True
@@ -421,9 +489,31 @@ class TJCMenu:
                 self.reactor.update_timer(self.hold_timer, self.reactor.NEVER)
         if cancelled and token == self.generation:
             self.page = 'main'
-            self.selected = 1 if action == 'load' else 2
+            self.selected = 2
             self.error = None
             self.gcode.respond_info('TJC menu: Filament operation cancelled')
+
+    def _extrude_filament(self, toolhead, sequence, token):
+        pending = []
+        for distance, feedrate in sequence:
+            while abs(distance) > .000001:
+                self._check_filament(token)
+                now = self.reactor.monotonic()
+                unused, estimated, empty = toolhead.check_busy(now)
+                pending = [(end, length) for end, length in pending
+                           if end > estimated]
+                length = min(abs(distance), .5)
+                if sum(item[1] for item in pending)+length > 1.000001:
+                    self.reactor.pause(now+.005)
+                    continue
+                step = length if distance > 0. else -length
+                target = toolhead.get_position()[3]+step
+                toolhead.manual_move([None, None, None, target], feedrate/60.)
+                # Flush to obtain the actual scheduled endpoint, without
+                # draining motion. Refill while the next half-mm is moving.
+                pending.append((toolhead.get_last_move_time(), length))
+                distance -= step
+        self._check_filament(token)
 
     def _check_filament(self, token):
         self._check_action(token)
@@ -436,7 +526,8 @@ class TJCMenu:
         if (not full and phase == self.filament_phase
             and now < self.filament_next_update):
             return
-        read_temperature = full or now >= self.filament_next_update
+        read_temperature = (full or phase != self.filament_phase
+                            or now >= self.filament_next_update)
         temperature = self.filament_temperature
         if read_temperature:
             temperature = layout.temperature_value(heater.get_temp(now)[0])
@@ -462,12 +553,12 @@ class TJCMenu:
         self.gcode.respond_info('TJC menu: %s' % error)
 
     def get_status(self, eventtime):
-        labels = layout.MAIN if self.page == 'main' else layout.MOVES
+        labels = layout.PAGES[self.page][1] if self.is_active() else ()
         return {'active': self.is_active(), 'page': self.page,
                 'selected': labels[self.selected] if self.is_active() else None,
                 'busy': self.busy, 'error': self.error,
                 'filament_action': self.filament_action,
-                'cancel_requested': self.cancel_requested}
+                'cancel_requested': self.cancel_requested, 'view': self.view}
 
 
 def load_config(config):

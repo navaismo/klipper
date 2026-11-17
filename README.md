@@ -26,8 +26,9 @@ CR Touch and the stock load cell.
 
 The print card stays unchanged while printing or paused. It shows the file's
 estimated total time and temperature targets, with no live progress, layer,
-remaining-time or heater updates. The Load/Unload screen shows the current
-nozzle temperature while that operation runs with the printer idle.
+remaining-time or heater updates. The Load/Unload screen updates nozzle
+temperature while heating, then stays static while feeding or retracting
+filament.
 
 The mainboard's C driver handles the LCD connection over USART2, serial
 frames and drawing commands. The host prepares the screen content without
@@ -35,13 +36,29 @@ opening an LCD serial port.
 
 ## On my printer
 
-Here are the idle screen, both menus and two print cards on my printer.
+Here's how the LCD looks on my printer. The menu and IsoMap photos are from
+November 17, 2026, arranged in menu order.
 
-<img src="Screenshots/IdleV7.jpg" alt="Idle screen with Klipper branding and MCU firmware revision and build date" width="300">
-
-| Main menu | Movement submenu |
+| Idle screen | Klipper Menu |
 | --- | --- |
-| <img src="Screenshots/Menu1.jpg" alt="Main knob menu with Home, Load, Unload, Preheat, More Moves and hold-to-idle hint" width="300"> | <img src="Screenshots/Menu2.jpg" alt="Movement submenu with six 10 mm XYZ actions and Back" width="300"> |
+| <img src="Screenshots/IdleV7.jpg" alt="Idle screen with Klipper branding and MCU firmware revision and build date" width="300"> | <img src="Screenshots/LCDMenus/2026-11-17/01-main-menu.jpg" alt="Klipper Menu with Homing XYZ, Movements, Filament, Tune and Info" width="300"> |
+
+| Movements | Move XYZ |
+| --- | --- |
+| <img src="Screenshots/LCDMenus/2026-11-17/02-movements.jpg" alt="Movements submenu with Move XYZ, Disable Motors, Deploy Probe and Stow Probe" width="300"> | <img src="Screenshots/LCDMenus/2026-11-17/03-move-xyz.jpg" alt="Move XYZ submenu with six 10 mm movements and Back" width="300"> |
+
+| Filament | Tune |
+| --- | --- |
+| <img src="Screenshots/LCDMenus/2026-11-17/04-filament.jpg" alt="Filament submenu with Unload, Load, Preheat and Cooldown" width="300"> | <img src="Screenshots/LCDMenus/2026-11-17/05-tune.jpg" alt="Tune submenu with Start Autooffset, Start Bed Level and View Bed Grid IsoMap" width="300"> |
+
+The Bed Grid IsoMap shows the measured surface with cell outlines, labeled
+X/Y/Z axes and a horizontal heat scale.
+
+<img src="Screenshots/LCDMenus/2026-11-17/06-bed-grid-isomap.jpg" alt="Physical LCD showing a 5x5 bed mesh with grid lines, X Y Z axes and a horizontal blue-to-red heat scale" width="400">
+
+| Info Version | Info Printer | Info GitHub |
+| --- | --- | --- |
+| <img src="Screenshots/LCDMenus/2026-11-17/07-info-version.jpg" alt="Info Version screen showing the connected MCU firmware and Klippy revisions" width="240"> | <img src="Screenshots/LCDMenus/2026-11-17/08-info-printer.jpg" alt="Info Printer screen showing the Ender-3 V3 SE model, homed axes and XYZ travel limits" width="240"> | <img src="Screenshots/LCDMenus/2026-11-17/09-info-github.jpg" alt="Info GitHub screen with the fork and upstream repository addresses" width="240"> |
 
 | Print card: skull case | Print card: slingshot |
 | --- | --- |
@@ -84,6 +101,31 @@ for this LCD.
 
 ## Knob operation
 
+The `Klipper Menu` now has this structure:
+
+```text
+Homing XYZ
+Movements
+  Move XYZ
+  Disable Motors
+  Deploy Probe / Stow Probe
+Filament
+  Unload / Load / Preheat / Cooldown
+Tune
+  Start Autooffset
+    Contact Regression (CR) / Force Trigger (FT)
+  Start Bed Level
+  View Bed Grid IsoMap
+Info
+  Info Version / Info Printer / Info GitHub
+```
+
+Each submenu has Back. Autooffset runs the configured CR or FT module;
+switching methods still requires selecting its include and reloading Klipper.
+Bed Level homes and runs the configured mesh calibration. IsoMap shows the
+active probed mesh as a static colored surface, with measured min/max/range.
+Click to return from a map or information page.
+
 Turn the knob either way while the idle screen is visible to open the menu.
 Turn clockwise to move down or counterclockwise to move up, then click to
 open a submenu or run the selected action. Hold for 0.8 seconds to return
@@ -103,7 +145,10 @@ mm/min. Press the knob to cancel: the active drawing transaction or queued
 extrusion segment finishes first (at most 1 mm of extrusion), then the
 nozzle turns off and the main menu returns. Completion and recoverable
 errors also turn the nozzle off. The operation restores G-code state and
-leaves the bed target unchanged.
+leaves the bed target unchanged. Once the nozzle is ready, a final screen
+update finishes before extrusion. No LCD updates run while feeding or
+retracting. A short queue keeps at most 1 mm outstanding and refills without
+waiting for every segment to finish.
 
 During a print, each new debounced press runs `PAUSE` once. Rotations do
 nothing during printing or pause, and clicks do nothing while paused.

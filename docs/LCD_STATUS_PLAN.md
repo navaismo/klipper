@@ -7,6 +7,65 @@ supports host-designed idle knob menus and a single printing-time `PAUSE`
 press. The original v1 scope excluded menus; that historical restriction
 is superseded by the owner-approved work below.
 
+## Nested menu and static filament motion screen (2026-11-17)
+
+Physical photos of the nested menus, info pages and the completed IsoMap are
+in `Screenshots/LCDMenus/2026-11-17/`, numbered in menu order with descriptive
+names. The [README gallery](../README.md#on-my-printer) shows these alongside
+the idle screen and print cards. The IsoMap photo shows the measured-cell
+grid, X/Y/Z labels and horizontal heat scale on the panel. These photos
+confirm appearance; they do not establish calibration accuracy or filament
+motion smoothness. Earlier menu photos remain historical references.
+
+The host menu now groups Homing XYZ, Movements, Filament, Tune and Info.
+`tjc_menu_layout.py` defines every page, parent, label, icon and action;
+`tjc_menu_views.py` prepares static info pages and the IsoMap. Existing
+idle rotation, click selection, held return, navigation cooldown, preflight/
+printing/pause exclusion and printing-time PAUSE behavior are retained.
+No screen design or transport change is added to MCU firmware.
+
+The isometric surface adapts the customized Marlin
+`lcd/dwin/creality/bed_level_visualizer.cpp` and `bed_level_surface.h`:
+normalized XY projection, centered visual height scale, zero-centered
+33-color palette and far-to-near triangles. A bounded host raster merges
+same-color scanline spans. Only generic rectangles/text reach the MCU,
+using the existing bounded batches with all operations validated first.
+The view snapshots the active probed mesh and displays min/max/range;
+it never probes, loads/saves a profile, or edits mesh values.
+
+The IsoMap now includes Marlin-style cell outlines, labeled X/Y/Z axes and
+a horizontal blue-to-red heat bar with signed negative/zero/positive labels.
+Grid edges are rasterized with their actual projected heights after filling
+each cell, allowing nearer cells to occlude far edges. Triangle diagonals
+are not drawn. Axes are painted behind the surface and labels stay outside
+its envelope. The visual height scale leaves room for the legend and Back;
+all measured values, palette semantics and static-view behavior are retained.
+
+Calibration menu entries use the existing exclusive CR/FT modules and shared
+`AUTO_Z_OFFSET` command. An unconfigured choice shows an error; no live
+backend switching, acceptance or saving is added. Bed Level uses configured
+`G28` and `BED_MESH_CALIBRATE` commands. Info Version reads the connected
+MCU build identity and the running Klippy version. All views close by click.
+
+Load/Unload updates changed temperature values only during heating. One final
+phase/temperature draw finishes before movement. Extrusion performs no LCD
+work. A maximum of two 0.5 mm segments is outstanding, tracked using scheduled
+endpoints and MCU print-time estimates; the reactor yields in short waits
+when full instead of draining motion after every millimeter. Cancellation
+stops submission and drains at most the outstanding 1 mm before heater-off
+and G-code restoration. Native extruder limits/acceleration still apply;
+host underruns and physical smoothness require hardware validation.
+The earlier 1 mm drain-after-each-step description below is historical.
+
+Offline validation passes 235 LCD/menu/virtual-SD tests, including native-C
+harnesses. Tests cover nested Back navigation, configured-method dispatch,
+calibration-result return, static mesh/info views, invalid mesh rejection,
+late drawing validation, multi-batch completion, bounded filament queues,
+cancellation and unchanged printing-time pause. The broader fork run has
+26 existing failures/errors outside these tests, reproduced with the pre-edit
+LCD modules; see the local baseline comparison in the development backup.
+No service restart, hardware action or firmware build was performed.
+
 ## Current setup and hardware confirmation (2026-11-02)
 
 The owner confirmed the finished appearance and supplied

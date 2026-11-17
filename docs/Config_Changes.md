@@ -1,5 +1,15 @@
 # Configuration Changes
 
+20261117 (fork LCD menu): Reorganize the host-owned knob UI into Homing XYZ,
+Movements, Filament, Tune and Info, with nested XYZ and CR/FT submenus.
+No configuration or MCU capability change is required. Autooffset runs only
+the configured CR or FT module; enable exactly one as before. Load/Unload
+now freezes its temperature display before extrusion and streams bounded
+segments with at most 1 mm outstanding, without per-segment motion drains.
+`tjc_menu.page` gains submenu names and `tjc_menu.view` identifies static
+mesh/info views. Existing print-time PAUSE and idle firmware/date behavior
+are unchanged.
+
 20261106 (fork Auto Z-offset names): Rename `[auto_z_offset]` to
 `[auto_z_offset_cr]` (Contact Regression) and `[auto_z_offset_native]` to
 `[auto_z_offset_ft]` (Force Trigger). Update section headers in existing
