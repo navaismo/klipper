@@ -357,7 +357,10 @@ class LoadCellProbingMove:
             if ((math.isnan(step) or math.isinf(step)) or step <= 0.
                     or (math.isnan(distance) or math.isinf(distance))):
                 raise self._printer.command_error('Invalid Z step resolution')
-            at_endpoint &= abs(distance) <= step
+            # Subtracting absolute positions may round one step slightly up.
+            at_endpoint &= (abs(distance) <= step
+                            or math.isclose(abs(distance), step,
+                                            rel_tol=1.e-9))
         return at_endpoint
 
     def set_safety_reference(self, reference_counts):

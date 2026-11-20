@@ -679,24 +679,45 @@ class NativeWorkflowTests(unittest.TestCase):
                             for pos in xy_moves))
 
     def test_bad_point_lists_rejected_before_trigger_creation(self):
-        data = [[], [(28., 28.)], [(28., 28.), (110., 110.)],
+        data = [[], [(28., 28.)], [(28.,), (110., 110.)],
                 [(28., 28.), (110., 110.), (28., 28.)],
                 [(28., 28.), (110., 110.), (float('nan'), 28.)],
                 [(28., 28.), (110., 110.), (180., float('inf'))],
                 [(28., 28.), (110., 110.), (180.,)]]
         for points in data:
-            count = self.factories['MCU_trigger_analog'].call_count
-            with self.assertRaises(RuntimeError):
-                native.ForceTriggerAutoZOffset(Config(
-                    self.p, {'probe_points': points}))
-            self.assertEqual(self.factories['MCU_trigger_analog'].call_count,
-                             count)
+            with self.subTest(points=points):
+                count = self.factories['MCU_trigger_analog'].call_count
+                printer = fixtures.Printer()
+                with self.assertRaisesRegex(RuntimeError,
+                        'probe_points|finite'):
+                    native.ForceTriggerAutoZOffset(Config(
+                        printer, {'probe_points': points}))
+                self.assertEqual(
+                    self.factories['MCU_trigger_analog'].call_count, count)
+                self.assertEqual(printer.gcode.commands, {})
+                self.assertEqual(printer.trace, [])
 
     def test_single_and_multi_point_options_are_mutually_exclusive(self):
         data = {'probe_point': [28., 28.], 'probe_points':
                 [(28., 28.), (110., 110.), (180., 28.)]}
         with self.assertRaisesRegex(RuntimeError, 'not both'):
             native.ForceTriggerAutoZOffset(Config(self.p, data))
+
+    def test_two_distinct_points_complete_without_applying_or_saving(self):
+        self.p.gcode.commands.pop('AUTO_Z_OFFSET')
+        points = [(28., 28.), (110., 110.)]
+        self.module = native.ForceTriggerAutoZOffset(
+            Config(self.p, {'probe_points': points}))
+        self.module._connect()
+        self.zs = iter([-.3, -.305, -.31] * 2)
+        result = self.run_command()
+        self.assertEqual([p['point'] for p in result['points']],
+                         [list(p) for p in points])
+        self.assertEqual(len(self.collectors), 6)
+        self.assertAlmostEqual(result['provisional_z_offset'], 1.470)
+        self.assertFalse(result['eligible_for_application'])
+        self.assertEqual(self.p.primary.offsets[2], 1.065)
+        self.p.objects['configfile'].set.assert_not_called()
 
     def test_multiline_points_accept_more_than_three_locations(self):
         self.p.gcode.commands.pop('AUTO_Z_OFFSET')

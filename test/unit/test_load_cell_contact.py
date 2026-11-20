@@ -8,14 +8,16 @@ import os
 import unittest
 from unittest import mock
 
-from test_auto_z_offset_cr import auto, Config, Gcmd, lcprobe, Printer, ROOT
+import test_auto_z_offset_cr as engine
+from test_auto_z_offset_cr import Gcmd, lcprobe, Printer, ROOT
+from extras import load_cell_contact
 from test_load_cell_diagnostics import curve
 
 spec = importlib.util.spec_from_file_location('contact_replay', os.path.join(
     ROOT, 'scripts', 'replay_load_cell_contact.py'))
 replay_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(replay_module)
-qualify = auto.load_cell_contact.qualify_contact
+qualify = load_cell_contact.qualify_contact
 
 
 def records():
@@ -214,93 +216,78 @@ class QualificationTests(unittest.TestCase):
 
 
 class PairIntegrationTests(unittest.TestCase):
+    """Replay measured ascent fits through the current CR paired workflow."""
     def setUp(self):
-        self.printer = Printer()
-        self.tap = mock.Mock()
-        self.tap.param_helper.get_probe_params.return_value = {
-            'load_cell_retract_dist': .5}
-        with mock.patch.object(lcprobe, 'LoadCellTapHelper',
-                               return_value=self.tap):
-            self.module = auto.ContactRegressionAutoZOffset(Config(
-                self.printer, {'probe_point': [28., 28.]}))
-        self.module._connect()
+        fixture = engine.WorkflowTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        self.printer, self.module, self.tap = (fixture.printer, fixture.module,
+                                             fixture.tap)
         self.module._check_geometry()
-        self.module._frame_event = mock.Mock()
-        self.module._probe = mock.Mock()
-
-    def configure_record(self, record):
-        report = record['diagnostic']
-        primary = report['regression_contact_z']
-        self.module._probe.return_value = mock.Mock(
-            test_z=record['cr_test_z'], bed_z=record['cr_test_z'] - 1.065)
-        self.tap.tapping_move.run_tap.return_value = ([28., 28., primary], True)
-        self.tap.tapping_move.get_status.return_value = {
-            'last_trigger_z': report['mcu_trigger_z']}
-        self.tap.tapping_move.get_contact_diagnostics.return_value = report
 
     def measure(self, record):
-        self.configure_record(record)
+        # Recompute the original fit from the complete acquired curve. The
+        # historical branch/onset verdict is not the current CR estimator.
+        result = replay_module.replay(record)
+        self.printer.primary.height = record['cr_test_z']
+        self.tap.tapping_move.run_tap.side_effect = None
+        self.tap.tapping_move.run_tap.return_value = (
+            [25., 28., result['primary_fit_z']], True)
+        self.tap.tapping_move.get_status.return_value = {
+            'last_trigger_z': record['diagnostic']['mcu_trigger_z']}
         return self.module._measure_pair(Gcmd(), Gcmd(), [], 0, 0,
                                          self.module._fingerprint())
 
-    def test_real_disagreement_refuses_pair_without_retry_or_save(self):
-        for record in records()[:2]:
-            self.tap.tapping_move.run_tap.reset_mock()
-            with self.assertRaisesRegex(RuntimeError,
-                                        'window_models_disagree'):
-                self.measure(record)
-            self.assertIsNone(self.module.last_contact['offset'])
-            self.assertAlmostEqual(self.module.last_contact['model_offset'],
-                                   record['recorded_offset_mm'])
-            self.tap.tapping_move.run_tap.assert_called_once()
-            self.assertIsNone(self.module.candidate)
-            self.printer.objects['configfile'].set.assert_not_called()
-            self.assertEqual(self.printer.primary.offsets[2], 1.065)
+    def test_recorded_pairs_use_original_ascent_fit_and_direct_difference(self):
+        for record in records():
+            with self.subTest(record=record['id']):
+                self.tap.tapping_move.run_tap.reset_mock()
+                measured = self.measure(record)
+                self.assertAlmostEqual(measured, record['recorded_offset_mm'])
+                contact = self.module.last_contact
+                self.assertEqual(contact['backend'], 'regression')
+                self.assertAlmostEqual(contact['regression_z'],
+                    record['diagnostic']['regression_contact_z'])
+                self.assertAlmostEqual(contact['force_trigger_z'],
+                    record['diagnostic']['mcu_trigger_z'])
+                self.assertAlmostEqual(contact['regression_delta'],
+                    contact['regression_z'] - contact['force_trigger_z'])
+                self.tap.tapping_move.run_tap.assert_called_once()
+                self.tap.tapping_move.run_tap.assert_called_with(
+                    mock.ANY, minimum_z=-3., maximum_descent=8.)
+                self.assertIsNone(self.module.candidate)
+                self.printer.objects['configfile'].set.assert_not_called()
+                self.assertEqual(self.printer.primary.offsets[2], 1.065)
 
-    def test_consistent_pair_preserves_original_offset_formula(self):
+    def test_missing_optional_report_does_not_replace_valid_regression(self):
         record = records()[2]
-        self.assertAlmostEqual(self.measure(record),
-            record['cr_test_z'] - auto.load_cell_contact_onset.estimate(
-                record['diagnostic'])['z'])
-        self.assertFalse(self.module.last_contact['contact_qualification']
-                         ['physical_contact_verified'])
-
-    def test_missing_report_does_not_fall_back_to_ascent_only(self):
         self.tap.tapping_move.get_contact_diagnostics.return_value = None
-        record = records()[2]
-        with mock.patch.object(auto.load_cell_contact, 'qualify_contact',
-                wraps=qualify) as check:
-            # Configure the normal paired path, then suppress its observer.
-            self.measure(record)
-            self.tap.tapping_move.get_contact_diagnostics.return_value = None
-            with self.assertRaisesRegex(RuntimeError, 'missing_acquisition'):
-                self.module._measure_pair(Gcmd(), Gcmd(), [], 0, 0,
-                                          self.module._fingerprint())
-            self.assertIsNone(check.call_args.args[0])
+        self.assertAlmostEqual(self.measure(record),
+                               record['recorded_offset_mm'])
+        self.tap.tapping_move.get_contact_diagnostics.assert_not_called()
+        self.printer.objects['configfile'].set.assert_not_called()
 
-    def test_primary_safety_error_wins_over_qualification(self):
-        self.module._probe.return_value = mock.Mock(test_z=1.2, bed_z=.135)
-        self.tap.tapping_move.run_tap.side_effect = RuntimeError(
-            'original RAW_RANGE safety error')
-        with self.assertRaisesRegex(RuntimeError, 'original RAW_RANGE'):
+    def test_mcu_safety_error_stops_pair_without_retry_or_result(self):
+        self.tap.tapping_move.run_tap.side_effect = RuntimeError('RAW_RANGE')
+        with self.assertRaisesRegex(RuntimeError, 'RAW_RANGE'):
             self.module._measure_pair(Gcmd(), Gcmd(), [], 0, 0,
                                       self.module._fingerprint())
-        self.tap.tapping_move.get_contact_diagnostics.assert_not_called()
-
-    def test_workflow_retains_rejection_and_invalidates_qualification(self):
-        self.configure_record(records()[1])
-        with self.assertRaisesRegex(RuntimeError, 'window_models_disagree'):
-            self.module.cmd_TEST_CONTACT(Gcmd(params={'COLD': 1}))
-        status = self.module.get_status(0.)
-        self.assertEqual(status['state'], 'error')
-        self.assertIsNone(status['last_contact']['offset'])
-        self.assertFalse(status['last_contact']['contact_qualification']
-                         ['eligible_for_candidate'])
-        self.assertFalse(status['contact_verified'])
-        self.assertFalse(status['candidate'])
-        self.assertFalse(self.module.busy)
         self.tap.tapping_move.run_tap.assert_called_once()
+        self.assertIsNone(self.module.last_contact)
+        self.assertIsNone(self.module.candidate)
         self.printer.objects['configfile'].set.assert_not_called()
+
+    def test_invalid_fit_does_not_fall_back_to_force_trigger_or_old_result(self):
+        self.measure(records()[2])
+        self.tap.tapping_move.run_tap.return_value = (
+            [25., 28., float('nan')], True)
+        with self.assertRaisesRegex(RuntimeError, 'Invalid nozzle contact'):
+            self.module.cmd_TEST_CONTACT(Gcmd())
+        self.assertIsNone(self.module.last_contact)
+        self.assertIsNone(self.module.candidate)
+        self.assertIsNone(self.module.result)
+        self.printer.objects['configfile'].set.assert_not_called()
+
 
 
 if __name__ == '__main__':

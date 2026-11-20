@@ -7,9 +7,9 @@ import os
 import unittest
 from unittest import mock
 
-import test_load_cell_contact as contacts
 import test_load_cell_diagnostics as diagnostics
-from test_auto_z_offset_cr import auto, Gcmd, lcprobe, Printer, ROOT
+from test_auto_z_offset_cr import lcprobe, Printer, ROOT
+from extras import load_cell_contact
 
 diag = lcprobe.load_cell_diagnostics
 
@@ -79,7 +79,7 @@ class RealWindowTests(unittest.TestCase):
                         'force_trigger_z', 'trigger_time'):
                 self.assertEqual(before[key], after[key])
             primary = before['regression_contact_z']
-            qualify = auto.load_cell_contact.qualify_contact
+            qualify = load_cell_contact.qualify_contact
             self.assertEqual(qualify(before, primary, .025),
                              qualify(after, primary, .025))
             self.assertEqual(
@@ -93,20 +93,6 @@ class RealWindowTests(unittest.TestCase):
         # Two original branch fits plus seven extra windows, not eleven fits.
         self.assertEqual(fit.call_count, 9)
 
-    def test_status_retains_legacy_rejection_with_supported_onset(self):
-        harness = contacts.PairIntegrationTests(
-            'test_consistent_pair_preserves_original_offset_formula')
-        harness.setUp()
-        self.addCleanup(harness.doCleanups)
-        record = records()[-1]
-        record['diagnostic'], unused = report(record)
-        harness.measure(record)
-        status = harness.module.last_contact
-        self.assertEqual(status['window_sensitivity'],
-                         record['diagnostic']['window_sensitivity'])
-        self.assertEqual(status['contact_qualification']['status'], 'rejected')
-        self.assertIsNotNone(status['offset'])
-        self.assertTrue(status['onset_qualification']['eligible_for_candidate'])
 
     def test_stable_biased_record_is_not_reported_as_physically_accurate(self):
         record = records()[2]
@@ -116,7 +102,7 @@ class RealWindowTests(unittest.TestCase):
         self.assertFalse(ws['absolute_accuracy_validated'])
         self.assertEqual(ws['physical_contact_bias'], 'unknown')
         primary = after['regression_contact_z']
-        self.assertTrue(auto.load_cell_contact.qualify_contact(
+        self.assertTrue(load_cell_contact.qualify_contact(
             after, primary, .025)['eligible_for_candidate'])
         self.assertAlmostEqual(record['cr_test_z'] - primary, 1.515)
 
@@ -132,7 +118,7 @@ class WindowFailureTests(unittest.TestCase):
         self.assertEqual(failed['window_sensitivity']['status'],
                          'diagnostic_error')
         primary = baseline['regression_contact_z']
-        qualify = auto.load_cell_contact.qualify_contact
+        qualify = load_cell_contact.qualify_contact
         self.assertEqual(qualify(baseline, primary, .025),
                          qualify(failed, primary, .025))
         for key in ('samples', 'descent', 'ascent', 'quality'):
@@ -147,7 +133,7 @@ class WindowFailureTests(unittest.TestCase):
                 raise RuntimeError('optional fit failed')
             return fit(data)
         result, unused = report(records()[2], fail_extra_windows)
-        self.assertTrue(auto.load_cell_contact.qualify_contact(
+        self.assertTrue(load_cell_contact.qualify_contact(
             result, result['regression_contact_z'], .025)
             ['eligible_for_candidate'])
         ws = result['window_sensitivity']
@@ -217,26 +203,6 @@ class WindowFailureTests(unittest.TestCase):
         self.assertEqual(moves, original_moves)
         self.assertEqual(tap.get_contact_diagnostics()['window_sensitivity']
                          ['status'], 'diagnostic_error')
-
-    def test_summary_failure_cannot_reject_supported_contact_onset(self):
-        harness = contacts.PairIntegrationTests(
-            'test_consistent_pair_preserves_original_offset_formula')
-        harness.setUp()
-        self.addCleanup(harness.doCleanups)
-        record = records()[-1]
-        record['diagnostic'], unused = report(record)
-        harness.configure_record(record)
-        gcmd = Gcmd()
-        def respond(text):
-            if text.startswith('Fit window sensitivity:'):
-                raise RuntimeError('console unavailable')
-        gcmd.respond_info.side_effect = respond
-        with self.assertLogs(level='WARNING'):
-            offset = harness.module._measure_pair(gcmd, Gcmd(), [], 0, 0,
-                                                 harness.module._fingerprint())
-        self.assertEqual(offset, harness.module.last_contact['offset'])
-        self.assertTrue(harness.module.last_contact['onset_qualification'][
-            'eligible_for_candidate'])
 
 
 if __name__ == '__main__':

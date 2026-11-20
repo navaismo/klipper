@@ -65,18 +65,31 @@ without reflashing; `TJC_CANVAS_VERSION=1` remains supported. Generic firmware
 uses the host-owned small idle footer even if the legacy footer capability
 is also present. Preserve the static print card and printing-time PAUSE.
 
-The integration retains the November 2 Auto Z-offset runtime and diagnostic
-work, including previously untracked helper modules and fixtures. Older
-workflow test mocks must provide current bounded tap parameters and acquired
-contact reports. Manual qualification is optional in the native workflow;
-tests must retain fresh-measurement, contact, spatial and acceptance checks.
-Do not reinstate retired runtime prerequisites to satisfy old tests.
+The current backends are `[auto_z_offset_cr]` and `[auto_z_offset_ft]`; enable
+one at a time. CR uses the native withdrawal regression and validates fresh
+paired measurements before offering ACCEPT. FT reports the native force-trigger
+position and does not apply or save an offset. Keep fresh-measurement, contact,
+spatial and acceptance checks in the tests. Do not restore retired onset,
+PRTouch-selection or provisional APPLY/ROLLBACK commands to satisfy old tests.
 
-The combined offline suite passes 465 Python/native-C tests. The combined
-STM32F103 firmware linked in an isolated validation build with both drawing
-backends (53876-byte binary, within the configured 65536-byte flash region).
-This validates integration, not flashing, physical offset accuracy or panel
-timing. Keep owner stashes/backups until the owner commits the reviewed merge.
+Historical contact, onset and PRTouch helpers remain available for offline
+analysis. Their tests import the analytical modules directly, without relying
+on the calibration backend to re-export them. The replay tools still reproduce
+the original recorded curves and offsets. Tests of removed runtime workflows
+have been replaced by coverage of the current CR paired measurements and FT
+point handling; analytical replay coverage remains active.
+
+The test fixtures provide native Z steppers and printer events so the tests
+exercise endpoint rejection and MCU cleanup. A result within one motor step
+of the travel endpoint is rejected, including floating-point rounding at that
+boundary. FT accepts two or more distinct finite points; malformed lists must
+fail before trigger creation or command registration.
+
+Run the full suite after updating upstream; use its reported count and result
+rather than a historical total. The isolated STM32F103 integration build linked
+with both drawing backends (53876-byte binary, within the configured 65536-byte
+flash region). These checks do not validate physical offset accuracy or panel
+timing. Keep backups until the reviewed merge has been committed.
 
 ## Homing and probe event contract
 

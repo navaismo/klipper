@@ -266,6 +266,8 @@ class Printer:
         return self.objects[name]
     def register_event_handler(self, name, callback):
         self.events.setdefault(name, []).append(callback)
+    def send_event(self, name, *args):
+        return [callback(*args) for callback in self.events.get(name, [])]
     def is_shutdown(self):
         return self.shutdown
     def add_object(self, name, value):
@@ -1375,7 +1377,9 @@ class EngineTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'RAW_RANGE'):
                 move.probing_move(Gcmd())
         report = lcprobe.json.loads(
-            logs.output[0].split('Load cell probe failure: ')[1])
+            next(item.split('Load cell probe failure: ')[1]
+                 for item in logs.output
+                 if 'Load cell probe failure: ' in item))
         self.assertEqual(report['observed_raw_min'], -23000)
         self.assertEqual(report['observed_raw_max'], 6999)
         self.assertEqual(report['sample_count'], 6000)

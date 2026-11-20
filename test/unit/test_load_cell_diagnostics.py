@@ -419,6 +419,8 @@ class IntegrationTests(unittest.TestCase):
         stepper = mock.Mock()
         stepper.get_name.return_value = 'stepper_z'
         stepper.mcu_to_commanded_position.return_value = 0.
+        stepper.get_step_dist.return_value = .0025
+        stepper.calc_position_from_coord.side_effect = lambda p: p[2]
         self.printer.toolhead.get_kinematics = mock.Mock()
         kin = self.printer.toolhead.get_kinematics.return_value
         kin.get_steppers.return_value = [stepper]
@@ -438,6 +440,8 @@ class IntegrationTests(unittest.TestCase):
         move._param_helper.get_probe_params.return_value = {
             'probe_speed': .5, 'lift_speed': .1, 'load_cell_retract_dist': .5}
         move._mcu_trigger_analog = mock.Mock()
+        move._mcu_trigger_analog.get_steppers.return_value = (
+            self.printer.toolhead.get_kinematics().get_steppers())
         move._mcu_trigger_analog.get_last_trigger_time.return_value = 101.
         collector = mock.Mock(min_time=100.)
         collector.collect_until.return_value = (samples, (1, 0)

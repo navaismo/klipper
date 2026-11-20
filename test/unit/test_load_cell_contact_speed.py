@@ -27,6 +27,10 @@ class NativeContactTests(unittest.TestCase):
         move._param_helper = mock.Mock()
         move._param_helper.get_probe_params.return_value = {'probe_speed': .5}
         move._mcu_trigger_analog = mock.Mock()
+        stepper = mock.Mock()
+        stepper.get_step_dist.return_value = .0025
+        stepper.calc_position_from_coord.side_effect = lambda p: p[2]
+        move._mcu_trigger_analog.get_steppers.return_value = [stepper]
         move._log_trace = False
         collector = mock.Mock()
         move._start_collector = mock.Mock(return_value=collector)
@@ -59,6 +63,33 @@ class NativeContactTests(unittest.TestCase):
         move, collector, homing = self.make_move()
         move.probing_move(engine.Gcmd(), -10., 20.)
         self.assertEqual(homing.probing_move.call_args.args[1][2], -3.)
+
+    def test_trigger_within_one_step_of_endpoint_is_not_valid_contact(self):
+        for delta in (0., .001, .0025):
+            with self.subTest(delta=delta):
+                move, collector, homing = self.make_move()
+                homing.probing_move.return_value = [28., 28., -.5 + delta, 0.]
+                with self.assertRaisesRegex(RuntimeError, 'travel endpoint'):
+                    move.probing_move(engine.Gcmd(), -.5, 5.5)
+                homing.probing_move.assert_called_once()
+                collector.stop_collecting.assert_called_once()
+
+    def test_trigger_before_endpoint_keeps_measured_position(self):
+        for delta in (.00250001, .005):
+            with self.subTest(delta=delta):
+                move, collector, homing = self.make_move()
+                homing.probing_move.return_value = [28., 28., -.5 + delta, 0.]
+                pos, returned = move.probing_move(engine.Gcmd(), -.5, 5.5)
+                self.assertEqual(pos[2], -.5 + delta)
+                self.assertIs(returned, collector)
+                collector.stop_collecting.assert_not_called()
+
+    def test_missing_z_steppers_rejects_contact_and_closes_collector(self):
+        move, collector, homing = self.make_move()
+        move._mcu_trigger_analog.get_steppers.return_value = []
+        with self.assertRaisesRegex(RuntimeError, 'No load cell Z steppers'):
+            move.probing_move(engine.Gcmd(), -.3, 5.3)
+        collector.stop_collecting.assert_called_once()
 
     def test_incomplete_or_invalid_bounds_fail_before_tare_or_motion(self):
         for floor, distance in ((None, 1.), (-.3, None), (-.3, 0.),
