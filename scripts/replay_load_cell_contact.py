@@ -11,7 +11,8 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 # The existing offline harness supplies printer/MCU mocks for LCBestFit.
 sys.path.insert(0, os.path.join(ROOT, 'test', 'unit'))
-from test_auto_z_offset_cr import auto, lcprobe, Printer
+from test_auto_z_offset_cr import lcprobe, Printer
+from extras import load_cell_contact, load_cell_contact_onset
 
 
 def replay(record, tolerance=.025):
@@ -32,9 +33,9 @@ def replay(record, tolerance=.025):
     samples = [[r[0], r[1], r[4], r[5]] for r in rows]
     report = lcprobe.load_cell_diagnostics.build_report(
         samples, motion, positions.__getitem__, fit, primary)
-    qualification = auto.load_cell_contact.qualify_contact(
+    qualification = load_cell_contact.qualify_contact(
         report, primary, tolerance)
-    onset = auto.load_cell_contact_onset.estimate(report)
+    onset = load_cell_contact_onset.estimate(report)
     onset['observational_offset'] = (record['cr_test_z'] - onset['z']
         if onset['z'] is not None else None)
     cr_z = record['cr_test_z']

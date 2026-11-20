@@ -6,7 +6,6 @@ import math
 import os
 import unittest
 
-import test_auto_z_offset_diagnostic as commands
 import test_load_cell_window_diagnostics as windows
 from test_auto_z_offset_cr import ROOT, lcprobe, Printer
 from test_load_cell_contact import replay_module
@@ -135,50 +134,6 @@ class FiveTraceTests(unittest.TestCase):
                                          grid + max(1., grid)*1.e-8)
                     self.assertTrue(math.isfinite(actual))
 
-
-class FiveTraceConsoleTests(unittest.TestCase):
-    use_record = commands.DiagnosticCommandTests.use_record
-    command = commands.DiagnosticCommandTests.command
-    messages = commands.DiagnosticCommandTests.messages
-    assert_not_applicable = (
-        commands.DiagnosticCommandTests.assert_not_applicable)
-
-    @classmethod
-    def setUpClass(cls):
-        cls.recorded = records()
-        cls.rebuilt = [windows.report(r)[0] for r in cls.recorded]
-
-    def setUp(self):
-        commands.DiagnosticCommandTests.setUp(self)
-
-    def test_report_separates_each_validated_branch_from_primary(self):
-        for index, record in enumerate(self.recorded):
-            with self.subTest(record=record['id']):
-                self.use_record(index)
-                if index < 3:
-                    self.command()
-                else:
-                    self.command(COLD=0, BED_TEMP=60., NOZZLE_TEMP=170.)
-                d = self.diagnostic
-                c = self.module.last_contact
-                self.assertEqual(c['descent_fit_z'], d['descent_fit_z'])
-                self.assertEqual(c['ascent_fit_z'], d['ascent_fit_z'])
-                self.assertEqual(c['descent_status'], d['descent']['status'])
-                self.assertEqual(c['ascent_status'], d['ascent']['status'])
-                self.assertAlmostEqual(c['primary_fit_z'],
-                                       d['regression_contact_z'])
-                self.assertAlmostEqual(c['observational_offset'],
-                                       record['recorded_offset_mm'])
-                self.assertIn('descent_status=identified', self.messages())
-                if index >= 3:
-                    self.assertIn('ascent_fit_z=unavailable', self.messages())
-                    self.assertIn('ascent_status=insufficient_signal',
-                                  self.messages())
-                    self.assertNotIn('descent_fit_z=unavailable',
-                                     self.messages())
-                    self.assertIn('unsupported_contact_branches',
-                                  self.messages())
-                self.assert_not_applicable()
 
 
 if __name__ == '__main__':

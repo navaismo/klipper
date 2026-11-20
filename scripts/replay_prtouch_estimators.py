@@ -11,7 +11,8 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'test', 'unit'))
 # Existing offline harness provides LCBestFit's printer/MCU imports.
-from test_auto_z_offset_cr import auto, lcprobe, Printer
+from test_auto_z_offset_cr import lcprobe, Printer
+from extras import load_cell_contact_onset, load_cell_prtouch_estimator
 
 
 def records(data):
@@ -39,8 +40,8 @@ def replay(record):
     motion = diagnostic['motion']
     stop = motion.get('contact_stop', {})
     report = stop.get('decision_report', diagnostic)
-    current = auto.load_cell_contact_onset.estimate(report)
-    prtouch = auto.load_cell_prtouch_estimator.estimate(report,
+    current = load_cell_contact_onset.estimate(report)
+    prtouch = load_cell_prtouch_estimator.estimate(report,
                                         motion.get('sample_period'))
     fit = lcprobe.LCBestFit(Printer()).find_best_fit
     start = motion['ascent_start_time']

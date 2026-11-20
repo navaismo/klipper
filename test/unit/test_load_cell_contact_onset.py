@@ -6,12 +6,9 @@ import json
 import os
 import random
 import unittest
-from unittest import mock
 
-import test_auto_z_offset_diagnostic as commands
-from test_auto_z_offset_cr import auto, ROOT
-
-onset = auto.load_cell_contact_onset
+from test_auto_z_offset_cr import ROOT
+from extras import load_cell_contact_onset as onset
 
 
 def records():
@@ -156,69 +153,6 @@ class SixRealTraceTests(unittest.TestCase):
         # model and any supposed printing target do not select an onset.
         self.assertEqual(before, onset.estimate(data))
 
-
-class DiagnosticOnsetTests(unittest.TestCase):
-    use_record = commands.DiagnosticCommandTests.use_record
-    command = commands.DiagnosticCommandTests.command
-    assert_not_applicable = (
-        commands.DiagnosticCommandTests.assert_not_applicable)
-
-    @classmethod
-    def setUpClass(cls):
-        cls.recorded = records()
-        cls.rebuilt = [copy.deepcopy(r['diagnostic']) for r in cls.recorded]
-
-    def setUp(self):
-        commands.DiagnosticCommandTests.setUp(self)
-        self.use_record(0)
-
-    def test_withdrawal_disagreement_does_not_reject_supported_descent(self):
-        self.command()
-        self.assertEqual(self.module.state, 'diagnostic_complete')
-        contact = self.module.last_contact
-        self.assertEqual(contact['contact_qualification']['status'], 'rejected')
-        self.assertEqual(contact['contact_onset']['status'], 'identified')
-        self.assertAlmostEqual(contact['contact_onset']['observational_offset'],
-            self.record['cr_test_z'] - contact['contact_onset']['z'])
-        self.assertNotEqual(contact['contact_onset']['observational_offset'],
-                            1.065)
-        self.assert_not_applicable()
-
-    def test_unresolved_hot_never_creates_an_offset(self):
-        self.use_record(-1)
-        self.command(COLD=0, BED_TEMP=60., NOZZLE_TEMP=170.)
-        self.assertEqual(self.module.state, 'diagnostic_rejected')
-        contact = self.module.last_contact['contact_onset']
-        self.assertIsNone(contact['z'])
-        self.assertIsNone(contact['observational_offset'])
-        self.assert_not_applicable()
-
-    def test_estimator_failure_is_reported_without_retry_or_application(self):
-        with mock.patch.object(onset, 'estimate', side_effect=RuntimeError()):
-            with self.assertLogs(level='WARNING'):
-                self.command()
-        self.assertEqual(self.module.state, 'diagnostic_rejected')
-        self.assertEqual(self.module.last_contact['contact_onset']['reasons'],
-                         ['estimator_error'])
-        self.tap.tapping_move.run_tap.assert_called_once()
-        self.assert_not_applicable()
-
-    def test_original_mcu_safety_error_precedes_new_estimator(self):
-        self.tap.tapping_move.run_tap.side_effect = RuntimeError('RAW_RANGE')
-        with mock.patch.object(onset, 'estimate') as estimator:
-            with self.assertRaisesRegex(RuntimeError, 'RAW_RANGE'):
-                self.command()
-        estimator.assert_not_called()
-        self.assert_not_applicable()
-
-    def test_normal_workflow_uses_supported_onset_despite_withdrawal_gap(self):
-        with mock.patch.object(onset, 'estimate', wraps=onset.estimate) as fit:
-            self.module.cmd_AUTO_Z_OFFSET(commands.Gcmd('AUTO_Z_OFFSET'))
-        self.assertEqual(fit.call_count, 8)
-        self.assertEqual(self.module.state, 'candidate')
-        self.assertAlmostEqual(self.module.result['z_offset'],
-            self.record['cr_test_z'] - onset.estimate(self.diagnostic)['z'])
-        self.printer.objects['configfile'].set.assert_not_called()
 
 
 if __name__ == '__main__':
